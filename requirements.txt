@@ -3,3 +3,5 @@ python-docx
 reportlab
 pymupdf
 Pillow
+openpyxl
+pandas
