@@ -617,7 +617,7 @@ def make_template(extra_vars):
         for ri, val in enumerate(vals, 2):
             lst.cell(row=ri, column=ci, value=val)
         lst.column_dimensions[get_column_letter(ci)].width = 30
-        if name in headers:
+        if name in headers and not (name == "Desa" and "Kecamatan" in headers):
             col = get_column_letter(headers.index(name) + 1)
             L = get_column_letter(ci)
             # showErrorMessage=False -> boleh mengetik isian sendiri di luar dropdown
@@ -626,6 +626,29 @@ def make_template(extra_vars):
             ws.add_data_validation(dv)
             dv.add(f"{col}2:{col}500")
 
+    # Dropdown Desa bergantung pada Kecamatan (dependent dropdown via named range + INDIRECT)
+    if "Kecamatan" in headers and "Desa" in headers:
+        from openpyxl.workbook.defined_name import DefinedName
+        base_col = len(lists) + 2
+        for j, (label, kdb) in enumerate(KECAMATAN.items()):
+            ci = base_col + j
+            desa_k = [pretty_desa(k) for k, v in DESA_DB.items() if v == kdb]
+            lst.cell(row=1, column=ci, value=f"Desa - {label}").font = Font(bold=True)
+            for ri, val in enumerate(desa_k, 2):
+                lst.cell(row=ri, column=ci, value=val)
+            lst.column_dimensions[get_column_letter(ci)].width = 30
+            nm = "Desa_" + label.replace(" ", "_")
+            L = get_column_letter(ci)
+            wb.defined_names[nm] = DefinedName(nm, attr_text=f"Daftar!${L}$2:${L}${len(desa_k) + 1}")
+        kc = get_column_letter(headers.index("Kecamatan") + 1)
+        dc = get_column_letter(headers.index("Desa") + 1)
+        all_L = get_column_letter(list(lists).index("Desa") + 1)
+        all_rng = f"Daftar!${all_L}$2:${all_L}${len(lists['Desa']) + 1}"
+        dv = DataValidation(type="list", allow_blank=True, showErrorMessage=False,
+                            formula1=f'=IFERROR(INDIRECT("Desa_"&SUBSTITUTE({kc}2," ","_")),{all_rng})')
+        ws.add_data_validation(dv)
+        dv.add(f"{dc}2:{dc}500")
+
     pt = wb.create_sheet("Petunjuk")
     notes = [
         "PETUNJUK PENGISIAN",
@@ -633,7 +656,7 @@ def make_template(extra_vars):
         "2. Kolom biru = variabel default, kolom oranye = variabel tambahan (dipakai di teks sebagai {nama_kolom}).",
         "3. Dropdown hanya BANTUAN. Anda boleh mengetik isian sendiri (survei, kegiatan, kecamatan, desa, pelaksana, dll.) di luar daftar.",
         "4. Subround & Jenis Ubinan diisi bila Survei = Survei Ubinan. Triwulan diisi untuk survei berakhiran 'Triwulan B'.",
-        "5. Jika Kecamatan dan Desa sama-sama dikenali, kecocokannya dicek otomatis. Jika diketik sendiri, tidak dicek.",
+        "5. Pilih Kecamatan dulu; dropdown Desa otomatis menyesuaikan kecamatan terpilih. Jika diketik sendiri, tidak dicek.",
         "6. Nama Responden dipisah koma. Listing minimal 3 responden.",
         "7. Tanggal Pelaksanaan berformat tanggal (mis. 24/04/2026) dan harus sesuai Tahun.",
         "8. Nama Pelaksana di luar daftar: isi juga kolom 'NIP Pelaksana'. Untuk nama dalam daftar, NIP terisi otomatis.",
