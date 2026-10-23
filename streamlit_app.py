@@ -256,6 +256,13 @@ def process_photo_bytes(data: bytes):
     return buf.getvalue(), w_cm, h_cm
 
 
+@st.cache_data(show_spinner=False)
+def to_gray_bytes(data: bytes):
+    buf = io.BytesIO()
+    Image.open(io.BytesIO(data)).convert("L").save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
 def scale_photos(photos, width_cm, max_h_cm, paper="A4"):
     """Atur ukuran foto: lebar = width_cm, tinggi dibatasi max_h_cm, tidak melebihi lebar halaman."""
     cw = PAPER[paper][0] - 2 * MARGIN_LR
@@ -267,6 +274,8 @@ def scale_photos(photos, width_cm, max_h_cm, paper="A4"):
         if nh > max_h_cm:
             nh = max_h_cm
             nw = nh / ratio
+        if st.session_state.get("photo_color") == "Grayscale (hitam-putih)":
+            b = to_gray_bytes(b)
         out.append((b, nw, nh))
     return out
 
@@ -1378,7 +1387,8 @@ with st.sidebar:
     st.divider()
     paper = st.selectbox("Ukuran kertas", list(PAPER), index=0)
     use_kop = st.checkbox("Pakai kop surat di laporan", value=True)
-    st.subheader("Ukuran foto dokumentasi")
+    st.subheader("Ukuran & warna foto dokumentasi")
+    st.radio("Warna foto", ["Berwarna", "Grayscale (hitam-putih)"], horizontal=True, key="photo_color")
     photo_w = st.slider("Lebar foto (cm)", 3.0, 16.0, 8.5, 0.5)
     photo_h = st.slider("Tinggi maksimal foto (cm)", 3.0, 20.0, 9.5, 0.5,
                         help="Foto yang terlalu tinggi otomatis diperkecil proporsional.")
