@@ -191,7 +191,7 @@ BASE_VARS = ["kegiatan", "survei", "survei_tahun", "tahun", "kecamatan", "desa",
 
 DEFAULT_COLS = ["Kegiatan", "Survei", "Tahun", "Subround", "Jenis Ubinan", "Triwulan", "Kecamatan",
                 "Desa", "Nama SLS/Sampel", "Nama PCL", "Nama Responden", "Tanggal Pelaksanaan",
-                "Nama Pelaksana", "Nama File Foto"]
+                "Nama Pelaksana", "NIP Pelaksana", "Nama File Foto"]
 
 SUPER_P2 = ("Demikian pernyataan ini kami buat dengan sebenar-benarnya untuk dipergunakan sebagaimana "
             "mestinya. Apabila terdapat kekeliruan dalam pertanggungjawaban SPD dan mengakibatkan "
@@ -262,10 +262,10 @@ def make_vars(rec):
     t = rec["tanggal"]
     v = dict(kegiatan=rec["kegiatan"], survei=label, survei_tahun=label + suffix,
              tahun=str(rec["tahun"]), kecamatan=KEC_DOC.get(rec["kec"], rec["kec"]),
-             desa=pretty_desa(rec["desa"]), sls=rec["sls"], pcl=rec["pcl"],
+             desa=display_desa(rec["desa"]), sls=rec["sls"], pcl=rec["pcl"],
              responden=", ".join(rec["responden"]), tanggal=tgl_id(t), hari=str(t.day),
              bulan=BULAN[t.month - 1], tahun_pelaksanaan=str(t.year),
-             pelaksana=PELAKSANA[rec["pel"]][0])
+             pelaksana=rec["pelaksana_nama"])
     v.update(rec.get("extra", {}))
     return v
 
@@ -281,7 +281,7 @@ def assemble_points(texts, extras, v):
 
 
 def doc_data(rec, v, texts_perihal, points, photos, kop):
-    nama, nip = PELAKSANA[rec["pel"]]
+    nama, nip = rec["pelaksana_nama"], rec["pelaksana_nip"]
     return {"kop": kop, "kepada": "Kepala BPS Kabupaten Bangka Selatan", "perihal": texts_perihal,
             "tujuan": f"Kecamatan {v['kecamatan']}", "tanggal": v["tanggal"], "points": points,
             "photos": photos, "nama": nama, "nip": nip}
@@ -357,7 +357,7 @@ def build_docx(d, paper="A4"):
     _runs(p, "Hasil Pelaksanaan")
     _fmt(p, 2)
     n = 0
-    for txt in d["points"] + ["Dokumentasi:"]:
+    for txt in [p for p in d["points"] if p.strip()] + ["Dokumentasi:"]:
         n += 1
         par = doc.add_paragraph()
         _fmt(par, 3, justify=True)
@@ -488,7 +488,7 @@ def build_pdf(d, paper="A4"):
                         ("Tanggal Pelaksanaan", d["tanggal"])], [4.2, 0.4, cw - 4.6]),
               Spacer(1, 14), Paragraph("Hasil Pelaksanaan", S["base"]), Spacer(1, 2)]
     n = 0
-    for txt in d["points"] + ["Dokumentasi:"]:
+    for txt in [p for p in d["points"] if p.strip()] + ["Dokumentasi:"]:
         n += 1
         story.append(Paragraph(f"{n}. {_rl(txt)}", S["just"]))
     for img_bytes, w_cm, h_cm in d["photos"]:
@@ -562,10 +562,20 @@ def find_opt(value, options):
     return m.get(nk(value))
 
 
+def display_desa(desa):
+    if desa in DESA_DB:
+        return pretty_desa(desa)
+    return desa if re.match(r"(?i)(desa|kelurahan)\b", desa) else f"Desa {desa}"
+
+
+def placeholders_left(text):
+    return set(re.findall(r"\{(\w+)\}", text))
+
+
 def validate_rec(rec):
     errs = []
-    if DESA_DB.get(rec["desa"]) != KECAMATAN[rec["kec"]]:
-        errs.append(f"{pretty_desa(rec['desa'])} bukan bagian dari Kecamatan {KEC_DOC.get(rec['kec'], rec['kec'])}.")
+    if rec["desa"] in DESA_DB and rec["kec"] in KECAMATAN and DESA_DB[rec["desa"]] != KECAMATAN[rec["kec"]]:
+        errs.append(f"{display_desa(rec['desa'])} bukan bagian dari Kecamatan {KEC_DOC.get(rec['kec'], rec['kec'])}.")
     unit = "SLS" if rec["kegiatan"] == "Listing" else "sampel"
     if not rec["sls"].strip():
         errs.append(f"Nama {unit} belum diisi.")
@@ -594,7 +604,7 @@ def make_template(extra_vars):
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="1F4E78" if h in DEFAULT_COLS else "C55A11")
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.column_dimensions[get_column_letter(i)].width = 24 if h != "Survei" else 48
+        ws.column_dimensions[get_column_letter(i)].width = 48 if h == "Survei" else 24
     ws.row_dimensions[1].height = 32
     ws.freeze_panes = "A2"
 
@@ -610,7 +620,9 @@ def make_template(extra_vars):
         if name in headers:
             col = get_column_letter(headers.index(name) + 1)
             L = get_column_letter(ci)
-            dv = DataValidation(type="list", formula1=f"=Daftar!${L}$2:${L}${len(vals) + 1}", allow_blank=True)
+            # showErrorMessage=False -> boleh mengetik isian sendiri di luar dropdown
+            dv = DataValidation(type="list", formula1=f"=Daftar!${L}$2:${L}${len(vals) + 1}",
+                                allow_blank=True, showErrorMessage=False)
             ws.add_data_validation(dv)
             dv.add(f"{col}2:{col}500")
 
@@ -618,28 +630,29 @@ def make_template(extra_vars):
     notes = [
         "PETUNJUK PENGISIAN",
         "1. Isi sheet 'Data' mulai baris 2. Satu baris = satu dokumen laporan.",
-        "2. Kolom biru = variabel default, kolom oranye = variabel tambahan (bisa dipakai di gaya teks sebagai {nama_kolom}).",
-        "3. Pilih nilai dari dropdown bila tersedia (sumber: sheet 'Daftar').",
-        "4. Subround & Jenis Ubinan hanya diisi bila Survei = Survei Ubinan. Triwulan hanya untuk survei berakhiran 'Triwulan B'.",
-        "5. Desa harus sesuai dengan Kecamatan (dicek otomatis oleh aplikasi).",
+        "2. Kolom biru = variabel default, kolom oranye = variabel tambahan (dipakai di teks sebagai {nama_kolom}).",
+        "3. Dropdown hanya BANTUAN. Anda boleh mengetik isian sendiri (survei, kegiatan, kecamatan, desa, pelaksana, dll.) di luar daftar.",
+        "4. Subround & Jenis Ubinan diisi bila Survei = Survei Ubinan. Triwulan diisi untuk survei berakhiran 'Triwulan B'.",
+        "5. Jika Kecamatan dan Desa sama-sama dikenali, kecocokannya dicek otomatis. Jika diketik sendiri, tidak dicek.",
         "6. Nama Responden dipisah koma. Listing minimal 3 responden.",
-        "7. Tanggal Pelaksanaan format tanggal (mis. 24/04/2026) dan harus sesuai Tahun.",
-        "8. Nama File Foto (opsional): nama file foto yang akan diupload di aplikasi, pisahkan koma bila lebih dari satu.",
+        "7. Tanggal Pelaksanaan berformat tanggal (mis. 24/04/2026) dan harus sesuai Tahun.",
+        "8. Nama Pelaksana di luar daftar: isi juga kolom 'NIP Pelaksana'. Untuk nama dalam daftar, NIP terisi otomatis.",
+        "9. Nama File Foto (opsional): nama file foto yang diupload di aplikasi, pisahkan koma bila lebih dari satu.",
         "",
-        "Contoh baris: Listing | Survei Ubinan | 2026 | Subround 2 (SR 2) | Palawija | | Tukak Sadai | Bukit Terap |",
-        "RT 007 Dusun Terap | Nupriyadi | Amri, Sukri, Aripin | 24/04/2026 | Stenislaus Angga Aprianto, S.Tr.Stat | foto1.jpg",
+        "Contoh: Listing | Survei Ubinan | 2026 | Subround 2 (SR 2) | Palawija | | Tukak Sadai | Bukit Terap |",
+        "RT 007 Dusun Terap | Nupriyadi | Amri, Sukri, Aripin | 24/04/2026 | Stenislaus Angga Aprianto, S.Tr.Stat | | foto1.jpg",
     ]
     for i, t in enumerate(notes, 1):
         pt.cell(row=i, column=1, value=t)
     pt["A1"].font = Font(bold=True)
-    pt.column_dimensions["A"].width = 130
+    pt.column_dimensions["A"].width = 135
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
 
 
 def cell_str(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)) or x is pd.NaT:
+    if x is None or x is pd.NaT:
         return ""
     try:
         if pd.isna(x):
@@ -657,60 +670,80 @@ def parse_excel(file):
     df = xl.parse(sheet, dtype=object)
     df.columns = [str(c).strip() for c in df.columns]
     extra_cols = [c for c in df.columns if c not in DEFAULT_COLS and not c.startswith("Unnamed")]
+    cores = {k.split(" ", 1)[1]: k for k in DESA_DB}
+    peg_names = [n for n, _ in PELAKSANA]
     recs, errors = [], []
     for idx, row in df.iterrows():
-        vals = {c: row.get(c) for c in DEFAULT_COLS + extra_cols if c in df.columns}
+        cols = [c for c in DEFAULT_COLS + extra_cols if c in df.columns]
+        vals = {c: row.get(c) for c in cols}
         if all(cell_str(x) == "" for x in vals.values()):
             continue
         rn = idx + 2
-        g = lambda c: cell_str(vals.get(c))
+
+        def g(c):
+            return cell_str(vals.get(c))
+
         errs = []
-        keg = find_opt(g("Kegiatan"), KEGIATAN)
-        sur = find_opt(g("Survei"), SURVEI)
+        keg = find_opt(g("Kegiatan"), KEGIATAN) or g("Kegiatan")
+        if not keg:
+            errs.append("Kegiatan kosong")
+        sur = find_opt(g("Survei"), SURVEI) or g("Survei")
+        if not sur:
+            errs.append("Survei kosong")
         try:
             thn = int(float(g("Tahun")))
         except ValueError:
             thn = None
-        if not keg: errs.append("Kegiatan tidak valid")
-        if not sur: errs.append("Survei tidak valid")
-        if thn not in TAHUN: errs.append("Tahun tidak valid"); thn = thn or TAHUN[0]
+            errs.append("Tahun tidak valid")
         sub = jen = tri = None
         if sur == "Survei Ubinan":
             s = g("Subround")
-            sub = SUBROUND[int(s) - 1] if s in ("1", "2", "3") else find_opt(s, SUBROUND)
-            jen = find_opt(g("Jenis Ubinan"), JENIS_UBINAN)
-            if not sub: errs.append("Subround tidak valid")
-            if not jen: errs.append("Jenis Ubinan tidak valid")
+            sub = SUBROUND[int(s) - 1] if s in ("1", "2", "3") else (find_opt(s, SUBROUND) or s)
+            jen = find_opt(g("Jenis Ubinan"), JENIS_UBINAN) or g("Jenis Ubinan")
+            if not sub:
+                errs.append("Subround kosong")
+            if not jen:
+                errs.append("Jenis Ubinan kosong")
         if sur and has_B(sur):
-            try:
-                tri = int(float(g("Triwulan")))
-                assert tri in (1, 2, 3, 4)
-            except Exception:
-                errs.append("Triwulan harus 1-4"); tri = 1
+            tri = g("Triwulan")
+            if not tri:
+                errs.append("Triwulan harus diisi")
         kec_in = g("Kecamatan")
-        kec = find_opt(kec_in, list(KECAMATAN)) or (
-            "Lepar" if nk(kec_in) == nk("Lepar Pongok") else None)
-        if not kec: errs.append("Kecamatan tidak valid")
-        d_in = re.sub(r"^(desa|kelurahan|kel\.?)\s+", "", g("Desa"), flags=re.I)
-        cores = {k.split(" ", 1)[1]: k for k in DESA_DB}
-        desa = find_opt(d_in, list(cores))
-        desa = cores[desa] if desa else None
-        if not desa: errs.append("Desa tidak valid")
+        kec = find_opt(kec_in, list(KECAMATAN)) or ("Lepar" if nk(kec_in) == nk("Lepar Pongok") else kec_in)
+        if not kec:
+            errs.append("Kecamatan kosong")
+        d_in = re.sub(r"^(desa|kelurahan|kel\.?)\s+", "", g("Desa"), flags=re.I).strip()
+        desa = ""
+        if not d_in:
+            errs.append("Desa kosong")
+        else:
+            m = find_opt(d_in, list(cores))
+            desa = cores[m] if m else g("Desa")
         raw_t = vals.get("Tanggal Pelaksanaan")
+        tgl = None
         if isinstance(raw_t, (datetime, date)) and not pd.isna(raw_t):
             tgl = pd.Timestamp(raw_t).date()
         else:
             ts = pd.to_datetime(cell_str(raw_t), dayfirst=True, errors="coerce")
             tgl = None if pd.isna(ts) else ts.date()
-        if tgl is None: errs.append("Tanggal tidak valid")
-        pel_name = find_opt(g("Nama Pelaksana"), [n for n, _ in PELAKSANA])
-        if not pel_name: errs.append("Nama Pelaksana tidak valid")
-        rec = None
+        if tgl is None:
+            errs.append("Tanggal tidak valid")
+        pel_in = g("Nama Pelaksana")
+        pn = find_opt(pel_in, peg_names)
+        pel_nama = pel_nip = ""
+        if pn:
+            pel_nama, pel_nip = PELAKSANA[peg_names.index(pn)]
+        elif pel_in:
+            pel_nama, pel_nip = pel_in, g("NIP Pelaksana")
+            if not pel_nip:
+                errs.append("NIP Pelaksana harus diisi untuk nama di luar daftar")
+        else:
+            errs.append("Nama Pelaksana kosong")
         if not errs:
             rec = dict(kegiatan=keg, survei=sur, tahun=thn, subround=sub, jenis=jen, triwulan=tri, kec=kec,
                        desa=desa, sls=g("Nama SLS/Sampel"), pcl=g("Nama PCL"),
                        responden=split_names(g("Nama Responden")), tanggal=tgl,
-                       pel=[n for n, _ in PELAKSANA].index(pel_name),
+                       pelaksana_nama=pel_nama, pelaksana_nip=pel_nip,
                        extra={var_key(c): g(c) for c in extra_cols},
                        foto=[x.strip() for x in re.split(r"[,;\n]+", g("Nama File Foto")) if x.strip()])
             errs += validate_rec(rec)
@@ -723,7 +756,7 @@ def parse_excel(file):
 
 
 # ----------------------------------------------------------------------------
-# STATE
+# STATE & KOMPONEN BERSAMA
 # ----------------------------------------------------------------------------
 def init_state():
     ss = st.session_state
@@ -731,80 +764,212 @@ def init_state():
     ss.setdefault("styles_ver", 0)
     ss.setdefault("applied_style", "Default")
     ss.setdefault("extra_vars", [])
+    ss.setdefault("xl_edver", 0)
 
 
-def reset_form(prefix):
-    for k in list(st.session_state.keys()):
-        if k.startswith(prefix):
-            del st.session_state[k]
-    st.session_state["upl_n_" + prefix] = st.session_state.get("upl_n_" + prefix, 0) + 1
+def reset_inputs(prefixes, counter=None, extra_del=()):
+    """Reset HANYA isian data. Gaya teks, templat, dan poin uraian tidak dihapus."""
+    ss = st.session_state
+    for k in list(ss.keys()):
+        if k.startswith(tuple(prefixes)) or k in extra_del:
+            del ss[k]
+    if counter:
+        ss[counter] = ss.get(counter, 0) + 1
+
+
+LAP_INPUTS = ("lap_kegiatan", "lap_tahun", "lap_survei", "lap_subround", "lap_jenis", "lap_triwulan",
+              "lap_kec", "lap_desa_", "lap_sls", "lap_pcl", "lap_resp", "lap_tgl_", "lap_pel",
+              "lap_files_", "lap_mode", "lap_var_")
+SP_INPUTS = ("sp_peg", "sp_nomor", "sp_tgl")
+
+
+def restore(keys):
+    """Streamlit membuang state widget yang tidak ditampilkan; pulihkan dari salinan agar isian tidak hilang."""
+    ss = st.session_state
+    for k in keys:
+        if k not in ss and ("_keep_" + k) in ss:
+            ss[k] = ss["_keep_" + k]
+
+
+def save(keys):
+    ss = st.session_state
+    for k in keys:
+        if k in ss:
+            ss["_keep_" + k] = ss[k]
 
 
 def style_for(name, keg):
     s = st.session_state["styles"].get(name) or st.session_state["styles"]["Default"]
-    return s.get(keg) or DEFAULT_STYLE[keg]
+    key = keg if keg in KEGIATAN else "Pendataan"
+    return s.get(key) or DEFAULT_STYLE[key]
 
 
-def load_tpl_into_editor(name, keg):
+def all_var_names():
+    return BASE_VARS + [var_key(c) for c in st.session_state["extra_vars"]]
+
+
+def load_tpl_into_editor(prefix, name, keg):
     t = style_for(name, keg)
     for k in ("perihal", "p1", "p2", "p3"):
-        st.session_state[f"lap_tpl_{k}"] = t[k]
+        st.session_state[f"{prefix}_tpl_{k}"] = t[k]
 
 
-def cb_save_style(keg):
+def cb_save_style(prefix, keg):
     ss = st.session_state
-    new = (ss.get("lap_newstyle") or "").strip()
-    name = new or ss.get("lap_style_sel", "Default")
+    new = (ss.get(f"{prefix}_newstyle") or "").strip()
+    name = new or ss.get(f"{prefix}_style_sel", "Default")
     if name == "Default":
-        ss["lap_style_msg"] = ("error", "Isi 'Nama gaya baru' terlebih dahulu (gaya 'Default' tidak bisa ditimpa).")
+        ss[f"{prefix}_style_msg"] = ("error", "Isi 'Nama gaya baru' dulu (gaya 'Default' tidak bisa ditimpa).")
         return
     ss["styles"].setdefault(name, copy.deepcopy(DEFAULT_STYLE))
-    ss["styles"][name][keg] = {k: ss[f"lap_tpl_{k}"] for k in ("perihal", "p1", "p2", "p3")}
+    ss["styles"][name][keg] = {k: ss[f"{prefix}_tpl_{k}"] for k in ("perihal", "p1", "p2", "p3")}
     ss["styles_ver"] += 1
-    ss["lap_style_sel"] = name
-    ss["lap_tplsig"] = (keg, name, ss["styles_ver"])
-    ss["lap_newstyle"] = ""
-    ss["lap_style_msg"] = ("success", f"Gaya '{name}' untuk kegiatan {keg} tersimpan.")
+    ss[f"{prefix}_style_sel"] = name
+    ss[f"{prefix}_tplsig"] = (keg, name, ss["styles_ver"])
+    ss[f"{prefix}_newstyle"] = ""
+    ss[f"{prefix}_style_msg"] = ("success", f"Gaya '{name}' untuk kegiatan {keg} tersimpan.")
 
 
-def cb_apply_style(keg):
+def cb_apply_style(prefix, keg):
     ss = st.session_state
-    name = ss.get("lap_style_sel", "Default")
+    name = ss.get(f"{prefix}_style_sel", "Default")
     ss["applied_style"] = name
-    load_tpl_into_editor(name, keg)
-    ss["lap_style_msg"] = ("success", f"Gaya teks '{name}' diterapkan pada seluruh dokumen.")
+    load_tpl_into_editor(prefix, name, keg)
+    ss[f"{prefix}_style_msg"] = ("success", f"Gaya '{name}' diterapkan ke semua dokumen.")
 
 
-def cb_reset_texts():
-    st.session_state["lap_sig"] = None
-
-
-def cb_add_point():
+def style_editor(prefix, keg, save_label, apply_fmt):
     ss = st.session_state
-    txt = (ss.get("lap_newpoint") or "").strip()
+    styles = ss["styles"]
+    keep_keys = [f"{prefix}_style_sel"] + [f"{prefix}_tpl_{k}" for k in ("perihal", "p1", "p2", "p3")]
+    restore(keep_keys)
+    sel = st.selectbox("Pilih Gaya Teks (X)", list(styles), key=f"{prefix}_style_sel")
+    sig_t = (keg, sel, ss["styles_ver"])
+    if ss.get(f"{prefix}_tplsig") != sig_t or f"{prefix}_tpl_p1" not in ss:
+        ss[f"{prefix}_tplsig"] = sig_t
+        load_tpl_into_editor(prefix, sel, keg)
+    st.caption("Ubah templat kalimat. Variabel dalam kurung kurawal otomatis diganti: " +
+               ", ".join("{" + x + "}" for x in all_var_names()))
+    st.text_area("Templat Perihal", key=f"{prefix}_tpl_perihal", height=70)
+    st.text_area("Templat Poin 1", key=f"{prefix}_tpl_p1", height=90)
+    st.text_area("Templat Poin 2", key=f"{prefix}_tpl_p2", height=100)
+    st.text_area("Templat Poin 3", key=f"{prefix}_tpl_p3", height=90)
+    save(keep_keys)
+    st.text_input("Nama gaya baru", key=f"{prefix}_newstyle", placeholder="mis. Gaya Singkat")
+    b1, b2 = st.columns(2)
+    b1.button(save_label, on_click=cb_save_style, args=(prefix, keg), key=f"btn_save_style_{prefix}",
+              use_container_width=True)
+    b2.button(apply_fmt.format(X=sel), on_click=cb_apply_style, args=(prefix, keg),
+              key=f"btn_apply_style_{prefix}", use_container_width=True)
+    msg = ss.get(f"{prefix}_style_msg")
+    if msg:
+        (st.success if msg[0] == "success" else st.error)(msg[1])
+    st.caption(f"Gaya yang diterapkan ke semua dokumen: **{ss['applied_style']}**")
+    st.download_button("⬇️ Unduh semua gaya (JSON)", json.dumps(styles, ensure_ascii=False, indent=1),
+                       file_name="gaya_teks_laporan.json", mime="application/json", key=f"dl_styles_{prefix}")
+    up = st.file_uploader("Muat gaya dari file JSON", type=["json"], key=f"{prefix}_styleup")
+    if up is not None and ss.get("styleup_last") != (up.name, up.size):
+        try:
+            data = json.loads(up.getvalue().decode("utf-8"))
+            for k, val in data.items():
+                if k != "Default" and isinstance(val, dict):
+                    ss["styles"][k] = {kg: {x: str(val.get(kg, DEFAULT_STYLE[kg])[x]) for x in
+                                            ("perihal", "p1", "p2", "p3")} for kg in KEGIATAN}
+            ss["styleup_last"] = (up.name, up.size)
+            ss["styles_ver"] += 1
+            st.rerun()
+        except Exception:
+            st.error("File JSON gaya tidak valid.")
+    return sel
+
+
+# ---- variabel tambahan ----
+def cb_add_var(prefix):
+    ss = st.session_state
+    name = (ss.get(f"{prefix}_newvar") or "").strip()
+    vk = var_key(name)
+    existing = [var_key(c) for c in ss["extra_vars"]]
+    if not vk:
+        ss["var_msg"] = ("error", "Nama variabel belum diisi.")
+    elif vk in BASE_VARS or vk in existing or name in DEFAULT_COLS:
+        ss["var_msg"] = ("error", f"Variabel '{name}' sudah ada / bentrok dengan variabel default.")
+    else:
+        ss["extra_vars"].append(name)
+        ss[f"{prefix}_newvar"] = ""
+        ss["var_msg"] = ("success", f"Variabel ditambahkan. Pakai di teks sebagai {{{vk}}}.")
+
+
+def cb_del_var(i):
+    st.session_state["extra_vars"].pop(i)
+
+
+def var_manager(prefix):
+    ss = st.session_state
+    st.text_input("Nama variabel tambahan", key=f"{prefix}_newvar", placeholder="mis. Nama Koordinator")
+    st.button("➕ Tambahkan Variabel Selain Variabel Default", on_click=cb_add_var, args=(prefix,),
+              key=f"btn_addvar_{prefix}")
+    msg = ss.pop("var_msg", None)
+    if msg:
+        (st.success if msg[0] == "success" else st.error)(msg[1])
+    for i, c in enumerate(ss["extra_vars"]):
+        c1, c2 = st.columns([6, 1])
+        c1.caption(f"• {c} → {{{var_key(c)}}}")
+        c2.button("🗑️", key=f"btn_delvar_{prefix}_{i}", on_click=cb_del_var, args=(i,))
+
+
+# ---- poin tambahan ----
+def cb_insert_var(prefix, n):
+    ss = st.session_state
+    v = ss.get(f"{prefix}_insvar_{n}")
+    if v:
+        ss[f"{prefix}_newpoint"] = (ss.get(f"{prefix}_newpoint") or "") + "{" + v + "}"
+
+
+def cb_add_point(prefix):
+    ss = st.session_state
+    txt = (ss.get(f"{prefix}_newpoint") or "").strip()
     if txt:
-        ss.setdefault("lap_extras", []).append(
-            {"text": txt, "after": POS_OPTIONS.index(ss.get("lap_newpos", POS_OPTIONS[0]))})
-        ss["lap_newpoint"] = ""
+        ss.setdefault(f"{prefix}_extras", []).append(
+            {"text": txt, "after": POS_OPTIONS.index(ss.get(f"{prefix}_newpos", POS_OPTIONS[0]))})
+        ss[f"{prefix}_newpoint"] = ""
 
 
-def cb_del_point(i):
-    st.session_state["lap_extras"].pop(i)
+def cb_del_point(prefix, i):
+    st.session_state[f"{prefix}_extras"].pop(i)
+
+
+def points_editor(prefix):
+    ss = st.session_state
+    n = len(ss["extra_vars"])
+    st.markdown("**Tambah poin uraian**")
+    st.text_area("Uraian poin tambahan (boleh memakai variabel)", key=f"{prefix}_newpoint", height=80,
+                 placeholder="mis. Pada keluarga {nama_responden} terdapat {nama_anggota} dengan komoditas utamanya {komoditas}")
+    c1, c2 = st.columns([3, 2])
+    c1.selectbox("Variabel yang disisipkan", all_var_names(), key=f"{prefix}_insvar_{n}")
+    c2.markdown("<div style='height:1.9em'></div>", unsafe_allow_html=True)
+    c2.button("↳ Sisipkan variabel", on_click=cb_insert_var, args=(prefix, n), key=f"btn_insvar_{prefix}")
+    st.selectbox("Posisi poin", POS_OPTIONS, key=f"{prefix}_newpos",
+                 help="Sisipkan setelah poin x, atau biarkan pada urutan semestinya.")
+    st.button("➕ Tambah poin", on_click=cb_add_point, args=(prefix,), key=f"btn_addpoint_{prefix}")
+    for i, e in enumerate(ss.get(f"{prefix}_extras", [])):
+        a, b = st.columns([6, 1])
+        pos = "urutan semestinya" if e["after"] == 0 else f"setelah poin {e['after']}"
+        a.caption(f"• ({pos}) {e['text']}")
+        b.button("🗑️", key=f"btn_delpoint_{prefix}_{i}", on_click=cb_del_point, args=(prefix, i))
 
 
 # ----------------------------------------------------------------------------
-# HALAMAN: LAPORAN MANUAL
+# DOWNLOAD
 # ----------------------------------------------------------------------------
 def download_block(docs, paper, key, base_name):
-    """docs: list of (label, d)."""
     fmt = st.radio("Pilih format download", ["PDF", "Word (.docx)", "PDF + Word"], horizontal=True, key=key + "_fmt")
     files = []
     for i, (label, d) in enumerate(docs, 1):
-        nm = f"{base_name}" if len(docs) == 1 else f"{base_name}_{i:02d}"
+        nm = base_name if len(docs) == 1 else f"{base_name}_{i:02d}"
         if fmt in ("PDF", "PDF + Word"):
             files.append((nm + ".pdf", d["_pdf"]))
         if fmt in ("Word (.docx)", "PDF + Word"):
-            files.append((nm + ".docx", d["_build_docx"](d, paper)))
+            files.append((nm + ".docx", build_docx(d, paper)))
     if len(files) == 1:
         n, data = files[0]
         st.download_button("⬇️ Download " + n.rsplit(".", 1)[1].upper(), data, file_name=n,
@@ -812,6 +977,13 @@ def download_block(docs, paper, key, base_name):
     else:
         st.download_button(f"⬇️ Download ZIP ({len(files)} file)", zip_files(files), file_name=base_name + ".zip",
                            mime="application/zip", type="primary", key=key + "_dl")
+
+
+# ----------------------------------------------------------------------------
+# HALAMAN: LAPORAN MANUAL
+# ----------------------------------------------------------------------------
+def cb_reset_texts():
+    st.session_state["lap_sig"] = None
 
 
 def page_laporan(paper, use_kop):
@@ -822,8 +994,9 @@ def page_laporan(paper, use_kop):
     with col_form:
         h1, h2 = st.columns([2, 1])
         h1.subheader("1. Isi Data")
-        h2.button("🔄 Reset semua isian", on_click=reset_form, args=("lap_",), key="btn_reset_lap",
-                  use_container_width=True)
+        h2.button("🔄 Reset isian data", on_click=reset_inputs, args=(LAP_INPUTS, "upl_n_lap_"),
+                  key="btn_reset_lap", use_container_width=True,
+                  help="Hanya mengosongkan isian data. Gaya teks, templat, dan poin uraian tetap ada.")
         c1, c2 = st.columns(2)
         kegiatan = c1.selectbox("Pilih Kegiatan", KEGIATAN, key="lap_kegiatan")
         tahun = c2.selectbox("Pilih Tahun", TAHUN, key="lap_tahun")
@@ -850,6 +1023,15 @@ def page_laporan(paper, use_kop):
         tgl = st.date_input("Pilih Tanggal", value=tgl_default, min_value=date(tahun, 1, 1),
                             max_value=date(tahun, 12, 31), key=f"lap_tgl_{tahun}", format="DD/MM/YYYY")
         pel = st.selectbox("Nama Pelaksana", range(len(PELAKSANA)), format_func=lambda i: PELAKSANA[i][0], key="lap_pel")
+
+        with st.expander("➕ Variabel tambahan (untuk dipakai di uraian poin)"):
+            var_manager("lap")
+        extra = {}
+        if ss["extra_vars"]:
+            st.markdown("**Isi variabel tambahan**")
+            for c in ss["extra_vars"]:
+                extra[var_key(c)] = st.text_input(c, key=f"lap_var_{var_key(c)}")
+
         files = st.file_uploader("Upload Dokumentasi (JPG/JPEG, maks 5 MB per foto)", type=["jpg", "jpeg"],
                                  accept_multiple_files=True, key=f"lap_files_{ss.get('upl_n_lap_', 0)}")
         photos, perr = [], []
@@ -870,8 +1052,8 @@ def page_laporan(paper, use_kop):
             mode_single = mode.startswith("Masukkan")
 
     rec = dict(kegiatan=kegiatan, survei=survei, tahun=tahun, subround=subround, jenis=jenis, triwulan=triwulan,
-               kec=kec, desa=desa, sls=sls, pcl=pcl, responden=split_names(resp_txt), tanggal=tgl, pel=pel,
-               extra={})
+               kec=kec, desa=desa, sls=sls, pcl=pcl, responden=split_names(resp_txt), tanggal=tgl,
+               pelaksana_nama=PELAKSANA[pel][0], pelaksana_nip=PELAKSANA[pel][1], extra=extra)
     errors = validate_rec(rec) + perr
     for e in errors:
         col_form.error(e)
@@ -883,80 +1065,40 @@ def page_laporan(paper, use_kop):
             return
         v = make_vars(rec)
 
-        # ---- Gaya penulisan ----
         with st.expander("🎨 Gaya Penulisan Teks Laporan"):
-            styles = ss["styles"]
-            sel = st.selectbox("Pilih Gaya Teks (X)", list(styles), key="lap_style_sel")
-            sig_t = (kegiatan, sel, ss["styles_ver"])
-            if ss.get("lap_tplsig") != sig_t:
-                ss["lap_tplsig"] = sig_t
-                load_tpl_into_editor(sel, kegiatan)
-            st.caption("Ubah templat kalimat di bawah. Variabel dalam kurung kurawal otomatis diganti: " +
-                       ", ".join("{" + x + "}" for x in BASE_VARS + [var_key(c) for c in ss["extra_vars"]]))
-            st.text_area("Templat Perihal", key="lap_tpl_perihal", height=70)
-            st.text_area("Templat Poin 1", key="lap_tpl_p1", height=90)
-            st.text_area("Templat Poin 2", key="lap_tpl_p2", height=100)
-            st.text_area("Templat Poin 3", key="lap_tpl_p3", height=90)
-            st.text_input("Nama gaya baru", key="lap_newstyle", placeholder="mis. Gaya Singkat")
-            b1, b2 = st.columns(2)
-            b1.button("💾 Simpan Gaya Penulisan Teks Laporan", on_click=cb_save_style, args=(kegiatan,),
-                      key="btn_save_style", use_container_width=True)
-            b2.button(f"✅ Terapkan Gaya Teks '{sel}' Pada Seluruh Dokumen", on_click=cb_apply_style,
-                      args=(kegiatan,), key="btn_apply_style", use_container_width=True)
-            msg = ss.get("lap_style_msg")
-            if msg:
-                (st.success if msg[0] == "success" else st.error)(msg[1])
-            st.caption(f"Gaya yang diterapkan pada seluruh dokumen: **{ss['applied_style']}**")
-            st.download_button("⬇️ Unduh semua gaya (JSON)", json.dumps(styles, ensure_ascii=False, indent=1),
-                               file_name="gaya_teks_laporan.json", mime="application/json", key="dl_styles")
-            up = st.file_uploader("Muat gaya dari file JSON", type=["json"], key="lap_styleup")
-            if up is not None and ss.get("styleup_last") != (up.name, up.size):
-                try:
-                    data = json.loads(up.getvalue().decode("utf-8"))
-                    for k, val in data.items():
-                        if k != "Default" and isinstance(val, dict):
-                            ss["styles"][k] = {kg: {x: str(val.get(kg, DEFAULT_STYLE[kg])[x]) for x in
-                                                    ("perihal", "p1", "p2", "p3")} for kg in KEGIATAN}
-                    ss["styleup_last"] = (up.name, up.size)
-                    ss["styles_ver"] += 1
-                    st.rerun()
-                except Exception:
-                    st.error("File JSON gaya tidak valid.")
+            style_editor("lap", kegiatan, "💾 Simpan Gaya Penulisan Teks Laporan",
+                         "✅ Terapkan Gaya Teks {X} Pada Seluruh Dokumen")
 
         auto = {k: render_tpl(ss[f"lap_tpl_{k}"], v) for k in ("perihal", "p1", "p2", "p3")}
         sig = (tuple(sorted(v.items())), tuple(auto.values()))
-        if ss.get("lap_sig") != sig:
+        f_keys = [f"lap_f_{k}" for k in ("perihal", "p1", "p2", "p3")]
+        restore(f_keys)
+        if ss.get("lap_sig") != sig or any(k not in ss for k in f_keys):
             ss["lap_sig"] = sig
             for k, t in auto.items():
                 ss[f"lap_f_{k}"] = t
 
-        # ---- Edit & poin tambahan ----
         with st.expander("✏️ Edit teks & tambah poin uraian"):
             st.text_area("Perihal", key="lap_f_perihal", height=80)
             st.text_area("Poin 1", key="lap_f_p1", height=100)
             st.text_area("Poin 2", key="lap_f_p2", height=110)
             st.text_area("Poin 3", key="lap_f_p3", height=100)
+            save(f_keys)
             st.button("↩️ Kembalikan ke teks otomatis", on_click=cb_reset_texts, key="btn_reset_texts")
-            st.markdown("**Tambah poin uraian**")
-            st.text_area("Uraian poin tambahan", key="lap_newpoint", height=80)
-            st.selectbox("Posisi poin", POS_OPTIONS, key="lap_newpos",
-                         help="Pilih 'Sisipkan setelah poin x' atau biarkan pada urutan semestinya.")
-            st.button("➕ Tambah poin", on_click=cb_add_point, key="btn_add_point")
-            for i, e in enumerate(ss.get("lap_extras", [])):
-                cc1, cc2 = st.columns([6, 1])
-                pos = "urutan semestinya" if e["after"] == 0 else f"setelah poin {e['after']}"
-                cc1.caption(f"• ({pos}) {e['text']}")
-                cc2.button("🗑️", key=f"btn_del_{i}", on_click=cb_del_point, args=(i,))
+            st.divider()
+            points_editor("lap")
 
         points = assemble_points([ss["lap_f_p1"], ss["lap_f_p2"], ss["lap_f_p3"]], ss.get("lap_extras", []), v)
+        left = placeholders_left(ss["lap_f_perihal"] + " " + " ".join(points))
+        if left:
+            st.warning("Variabel belum terisi/terdefinisi: " + ", ".join("{" + x + "}" for x in sorted(left)))
+        empty = [x for x in placeholders_left(" ".join(points)) if x in extra and not extra[x]]
         groups = [photos] if (mode_single or len(photos) <= 1) else [[p] for p in photos]
         docs = []
         for g in groups:
             d = doc_data(rec, v, ss["lap_f_perihal"], points, g, use_kop)
             d["_pdf"] = build_pdf(d, paper)
-            d["_build_docx"] = build_docx
             docs.append((f"Dokumen {len(docs) + 1}", d))
-
         for label, d in docs:
             if len(docs) > 1:
                 st.markdown(f"**{label}**")
@@ -970,98 +1112,160 @@ def page_laporan(paper, use_kop):
 # ----------------------------------------------------------------------------
 # HALAMAN: EXCEL
 # ----------------------------------------------------------------------------
+def gen_templates(keg):
+    ss = st.session_state
+    key = keg if keg in KEGIATAN else "Pendataan"
+    if key == ss.get("xl_keg_edit") and all(f"xl_tpl_{k}" in ss for k in ("perihal", "p1", "p2", "p3")):
+        return {k: ss[f"xl_tpl_{k}"] for k in ("perihal", "p1", "p2", "p3")}
+    return style_for(ss["applied_style"], key)
+
+
+def cb_add_doc_point(idx):
+    ss = st.session_state
+    item = ss["xl_docs"][idx]
+    d = item["d"]
+    n = len(d["points"])
+    txt = (ss.get(f"xl_dnew_{idx}") or "").strip()
+    if not txt:
+        return
+    pos = ss.get(f"xl_dpos_{idx}_{n}", 0)
+    txt = render_tpl(txt, item["v"])
+    if pos == 0:
+        d["points"].append(txt)
+    else:
+        d["points"].insert(pos, txt)
+    ss["xl_edver"] += 1
+    ss["xl_zip"] = None
+    ss[f"xl_dnew_{idx}"] = ""
+
+
 def page_excel(paper, use_kop):
     ss = st.session_state
     st.title("📊 Generate Laporan dari Excel")
-    st.markdown("#### 1. Siapkan template")
+
+    st.markdown("#### 1. Siapkan template Excel")
     c1, c2 = st.columns([3, 2])
     with c1:
         st.caption("Kolom template sama dengan isian form manual. Tambahkan variabel lain bila perlu "
-                   "(bisa dipakai di gaya teks, mis. kolom 'Nama Koordinator' → {nama_koordinator}).")
-        nv = st.text_input("Nama variabel tambahan", key="xl_newvar", placeholder="mis. Nama Koordinator")
-        if st.button("➕ Tambahkan Variabel Selain Variabel Default", key="btn_addvar"):
-            if nv.strip() and nv.strip() not in ss["extra_vars"] and nv.strip() not in DEFAULT_COLS:
-                ss["extra_vars"].append(nv.strip())
-                st.rerun()
-        if ss["extra_vars"]:
-            st.write("Variabel tambahan: " + ", ".join(f"`{c}` → `{{{var_key(c)}}}`" for c in ss["extra_vars"]))
-            if st.button("Hapus semua variabel tambahan", key="btn_clearvar"):
-                ss["extra_vars"] = []
-                st.rerun()
+                   "(mis. 'Nama Koordinator' → {nama_koordinator}).")
+        var_manager("xl")
     with c2:
         st.write("**Kolom template:**")
         st.write(", ".join(DEFAULT_COLS + ss["extra_vars"]))
         st.download_button("⬇️ Download Template Excel", make_template(ss["extra_vars"]),
                            file_name="Template_Laporan_Translok.xlsx", key="dl_tpl",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    st.info("Dropdown di Excel hanya bantuan. Anda juga boleh mengetik isian sendiri di luar daftar "
+            "(survei, kegiatan, kecamatan, desa, pelaksana, dll.); aplikasi tetap membacanya.")
 
-    st.markdown("#### 2. Pilih gaya teks & upload Excel")
-    sc1, sc2 = st.columns([2, 3])
-    sel = sc1.selectbox("Gaya Teks (X)", list(ss["styles"]), key="xl_style_sel",
-                        index=list(ss["styles"]).index(ss["applied_style"]) if ss["applied_style"] in ss["styles"] else 0)
-    if sc1.button(f"✅ Terapkan Gaya Teks '{sel}' Pada Seluruh Dokumen", key="btn_xl_apply"):
-        ss["applied_style"] = sel
-    sc2.info(f"Gaya yang dipakai untuk seluruh dokumen: **{ss['applied_style']}**. "
-             "Gaya dibuat/disimpan di menu Laporan Perjalanan Translok.")
-    xl = st.file_uploader("Upload file Excel yang sudah diisi", type=["xlsx"], key=f"xl_file_{ss.get('upl_n_xl_', 0)}")
+    st.markdown("#### 2. Editor isian dokumen")
+    keg_edit = st.radio("Kegiatan yang diedit", KEGIATAN, horizontal=True, key="xl_keg_edit")
+    with st.expander("🎨 Gaya Penulisan Teks", expanded=True):
+        style_editor("xl", keg_edit, "💾 Simpan Gaya Penulisan Ini", "✅ Terapkan Gaya Penulisan {X} ke semua dokumen")
+        st.caption("Untuk kegiatan lain yang tidak sedang diedit dipakai gaya yang diterapkan. "
+                   "Simpan gaya sebelum berganti kegiatan agar editan tidak hilang.")
+    with st.expander("✏️ Edit & tambah poin uraian (berlaku untuk semua dokumen)", expanded=True):
+        points_editor("xl")
+
+    st.markdown("#### 3. Upload Excel & generate")
+    n_upl = ss.get("upl_n_xl_", 0)
+    xl = st.file_uploader("Upload file Excel yang sudah diisi", type=["xlsx"], key=f"xl_file_{n_upl}")
     fotos = st.file_uploader("Upload foto dokumentasi (opsional, sesuai kolom 'Nama File Foto')",
-                             type=["jpg", "jpeg"], accept_multiple_files=True, key=f"xl_fotos_{ss.get('upl_n_xl_', 0)}")
-    st.button("🔄 Reset", on_click=reset_form, args=("xl_",), key="btn_reset_xl")
-    if not xl:
+                             type=["jpg", "jpeg"], accept_multiple_files=True, key=f"xl_fotos_{n_upl}")
+    st.button("🔄 Reset upload", on_click=reset_inputs, args=(("xl_file_", "xl_fotos_"), "upl_n_xl_",
+                                                              ("xl_docs", "xl_zip")), key="btn_reset_xl",
+              help="Hanya mengosongkan file upload & hasil generate. Gaya dan poin tetap ada.")
+    if xl:
+        try:
+            recs, errors, _ = parse_excel(xl)
+        except Exception as e:
+            st.error(f"File Excel tidak bisa dibaca: {e}")
+            recs, errors = [], []
+        if recs or errors:
+            st.success(f"{len(recs)} baris valid.")
+        if errors:
+            st.error(f"{len(errors)} baris bermasalah dan dilewati:")
+            st.dataframe(pd.DataFrame(errors, columns=["Baris Excel", "Masalah"]), hide_index=True)
+        fmap = {f.name.casefold(): f for f in fotos or []}
+        if recs and st.button("🚀 Generate laporan dari Excel", type="primary", key="btn_gen_xl"):
+            docs, warns, left = [], [], set()
+            prog = st.progress(0.0)
+            for i, rec in enumerate(recs, 1):
+                v = make_vars(rec)
+                tpl = gen_templates(rec["kegiatan"])
+                texts = [render_tpl(tpl[k], v) for k in ("p1", "p2", "p3")]
+                points = assemble_points(texts, ss.get("xl_extras", []), v)
+                perihal = render_tpl(tpl["perihal"], v)
+                ph = []
+                for fn in rec["foto"]:
+                    f = fmap.get(fn.casefold())
+                    if f is None:
+                        warns.append(f"Baris {rec['row']}: foto '{fn}' tidak ditemukan di upload.")
+                    else:
+                        try:
+                            ph.append(process_photo_bytes(f.getvalue()))
+                        except Exception:
+                            warns.append(f"Baris {rec['row']}: foto '{fn}' tidak bisa dibaca.")
+                left |= placeholders_left(perihal + " " + " ".join(points))
+                d = doc_data(rec, v, perihal, points, ph, use_kop)
+                docs.append(dict(name=f"{i:02d}_{safe(v['tanggal'])}_{safe(v['kecamatan'])}_{safe(rec['pcl'])}",
+                                 label=f"Baris {rec['row']} – {rec['pcl']} – {v['kecamatan']}", d=d, v=v))
+                prog.progress(i / len(recs))
+            if left:
+                warns.append("Variabel belum terdefinisi/tidak ada kolomnya di Excel: " +
+                             ", ".join("{" + x + "}" for x in sorted(left)))
+            ss["xl_docs"], ss["xl_warns"], ss["xl_zip"] = docs, warns, None
+            ss["xl_edver"] += 1
+
+    docs = ss.get("xl_docs")
+    if not docs:
         return
-    try:
-        recs, errors, extra_cols = parse_excel(xl)
-    except Exception as e:
-        st.error(f"File Excel tidak bisa dibaca: {e}")
-        return
-    st.success(f"{len(recs)} baris valid.")
-    if errors:
-        st.error(f"{len(errors)} baris bermasalah dan dilewati:")
-        st.dataframe(pd.DataFrame(errors, columns=["Baris Excel", "Masalah"]), hide_index=True)
-    if not recs:
-        return
-    fmap = {f.name.casefold(): f for f in fotos or []}
+    for w in ss.get("xl_warns", []):
+        st.warning(w)
+    st.success(f"{len(docs)} dokumen siap. Pilih satu dokumen untuk dicek / diedit satu per satu.")
+    idx = st.selectbox("Pilih dokumen", range(len(docs)), format_func=lambda i: f"{i + 1}. {docs[i]['label']}",
+                       key="xl_pick")
+    item = docs[idx]
+    d = item["d"]
+    ev = ss["xl_edver"]
+    ce, cp = st.columns([1, 1.1], gap="large")
+    with ce:
+        with st.expander("✏️ Edit dokumen ini (hanya dokumen terpilih)", expanded=True):
+            np_ = st.text_area("Perihal", d["perihal"], key=f"xled_{ev}_{idx}_perihal", height=80)
+            pts = [st.text_area(f"Poin {j + 1}", p, key=f"xled_{ev}_{idx}_p{j}", height=110)
+                   for j, p in enumerate(d["points"])]
+            if np_ != d["perihal"] or pts != d["points"]:
+                d["perihal"], d["points"] = np_, pts
+                ss["xl_zip"] = None
+            st.caption("Kosongkan teks sebuah poin untuk menghapusnya dari dokumen.")
+            st.divider()
+            st.text_area("Tambah poin untuk dokumen ini (boleh memakai variabel)", key=f"xl_dnew_{idx}", height=80)
+            n = len(d["points"])
+            opts = [POS_OPTIONS[0]] + [f"Sisipkan setelah poin {j}" for j in range(1, n + 1)]
+            st.selectbox("Posisi poin", range(len(opts)), format_func=lambda i: opts[i], key=f"xl_dpos_{idx}_{n}")
+            st.button("➕ Tambah poin ke dokumen ini", on_click=cb_add_doc_point, args=(idx,),
+                      key=f"btn_adddoc_{idx}")
+    with cp:
+        st.markdown("**Preview**")
+        for png in render_preview(build_pdf(d, paper)):
+            st.image(png, use_container_width=True)
+
+    st.markdown("#### 4. Download")
     fmt = st.radio("Format hasil", ["PDF", "Word (.docx)", "PDF + Word"], horizontal=True, key="xl_fmt")
-
-    if st.button("🚀 Generate laporan dari Excel", type="primary", key="btn_gen_xl"):
-        out_files, previews, warns = [], [], []
-        prog = st.progress(0.0)
-        for i, rec in enumerate(recs, 1):
-            v = make_vars(rec)
-            tpl = style_for(ss["applied_style"], rec["kegiatan"])
-            texts = [render_tpl(tpl[k], v) for k in ("p1", "p2", "p3")]
-            ph = []
-            for fn in rec["foto"]:
-                f = fmap.get(fn.casefold())
-                if f is None:
-                    warns.append(f"Baris {rec['row']}: foto '{fn}' tidak ditemukan di upload.")
-                else:
-                    try:
-                        ph.append(process_photo_bytes(f.getvalue()))
-                    except Exception:
-                        warns.append(f"Baris {rec['row']}: foto '{fn}' tidak bisa dibaca.")
-            d = doc_data(rec, v, render_tpl(tpl["perihal"], v), texts, ph, use_kop)
-            pdf = build_pdf(d, paper)
-            nm = f"{i:02d}_{safe(v['tanggal'])}_{safe(v['kecamatan'])}_{safe(rec['pcl'])}"
-            if fmt in ("PDF", "PDF + Word"):
-                out_files.append((nm + ".pdf", pdf))
-            if fmt in ("Word (.docx)", "PDF + Word"):
-                out_files.append((nm + ".docx", build_docx(d, paper)))
-            previews.append((nm, pdf))
-            prog.progress(i / len(recs))
-        ss["xl_result"] = dict(zip=zip_files(out_files), previews=previews, warns=warns, n=len(recs))
-
-    res = ss.get("xl_result")
-    if res:
-        for w in res["warns"]:
-            st.warning(w)
-        st.success(f"{res['n']} dokumen berhasil dibuat.")
-        st.download_button("⬇️ Download semua (ZIP)", res["zip"], file_name="Laporan_Translok_dari_Excel.zip",
+    if st.button("📦 Siapkan file untuk download", key="btn_zip"):
+        files = []
+        with st.spinner("Membuat file..."):
+            for it in docs:
+                if fmt in ("PDF", "PDF + Word"):
+                    files.append((it["name"] + ".pdf", build_pdf(it["d"], paper)))
+                if fmt in ("Word (.docx)", "PDF + Word"):
+                    files.append((it["name"] + ".docx", build_docx(it["d"], paper)))
+        ss["xl_zip"] = zip_files(files)
+    if ss.get("xl_zip"):
+        st.download_button("⬇️ Download semua (ZIP)", ss["xl_zip"], file_name="Laporan_Translok_dari_Excel.zip",
                            mime="application/zip", type="primary", key="dl_xl_zip")
-        names = [n for n, _ in res["previews"]]
-        pick = st.selectbox("Preview dokumen", names, key="xl_pick")
-        for png in render_preview(dict(res["previews"])[pick]):
-            st.image(png, width=650)
+    else:
+        st.caption("Klik 'Siapkan file untuk download' (diulang bila ada edit baru).")
 
 
 # ----------------------------------------------------------------------------
@@ -1078,7 +1282,7 @@ def page_super(paper):
     with col_form:
         h1, h2 = st.columns([2, 1])
         h1.subheader("1. Isi Data")
-        h2.button("🔄 Reset semua isian", on_click=reset_form, args=("sp_",), key="btn_reset_sp",
+        h2.button("🔄 Reset isian data", on_click=reset_inputs, args=(SP_INPUTS,), key="btn_reset_sp",
                   use_container_width=True)
         idx = st.selectbox("Nama Pegawai", range(len(PEGAWAI)), format_func=lambda i: PEGAWAI[i]["nama"],
                            key="sp_peg", index=11)
