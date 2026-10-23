@@ -354,12 +354,26 @@ def _setup_doc(paper):
 def _kv_table(doc, rows, widths):
     t = doc.add_table(rows=len(rows), cols=3)
     t.autofit = False
+    for j, w in enumerate(widths):
+        t.columns[j].width = Cm(w)
     for i, (a, b) in enumerate(rows):
         for j, txt in enumerate([a, ":", b]):
             c = t.rows[i].cells[j]
             c.width = Cm(widths[j])
             _fmt(c.paragraphs[0])
             _runs(c.paragraphs[0], txt)
+
+
+def sig_width(texts, cw, min_w):
+    """Lebar kolom tanda tangan (cm) agar nama/NIP terpanjang tetap satu baris."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    need = max(stringWidth(t, "Times-Roman", 12) for t in texts if t) / 72 * 2.54 + 0.8
+    return min(max(min_w, need), cw)
+
+
+def _nowrap(cell):
+    tcpr = cell._tc.get_or_add_tcPr()
+    tcpr.append(OxmlElement("w:noWrap"))
 
 
 def build_docx(d, paper="A4"):
@@ -396,8 +410,12 @@ def build_docx(d, paper="A4"):
     sig = doc.add_table(rows=1, cols=2)
     sig.autofit = False
     sig.alignment = WD_TABLE_ALIGNMENT.LEFT
-    sig.rows[0].cells[0].width = Cm(cw - 7.5)
-    sig.rows[0].cells[1].width = Cm(7.5)
+    rw = sig_width([f"Toboali, {d['tanggal']}", d["nama"], f"NIP. {d['nip']}"], cw, 7.5)
+    sig.columns[0].width = Cm(cw - rw)
+    sig.columns[1].width = Cm(rw)
+    sig.rows[0].cells[0].width = Cm(cw - rw)
+    sig.rows[0].cells[1].width = Cm(rw)
+    _nowrap(sig.rows[0].cells[1])
     cell = sig.rows[0].cells[1]
     lines = [f"Toboali, {d['tanggal']}", "Pelaksana SPD", "", "", "", "", d["nama"], f"NIP. {d['nip']}"]
     for i, ln in enumerate(lines):
@@ -441,8 +459,12 @@ def build_super_docx(d, paper="A4"):
         _fmt(doc.add_paragraph(), 6)
     sig = doc.add_table(rows=1, cols=2)
     sig.autofit = False
-    sig.rows[0].cells[0].width = Cm(cw - 6.5)
-    sig.rows[0].cells[1].width = Cm(6.5)
+    rw = sig_width([f"Bangka Selatan, {d['tanggal']}", sign_name(d["nama"]), f"NIP. {d['nip']}"], cw, 6.5)
+    sig.columns[0].width = Cm(cw - rw)
+    sig.columns[1].width = Cm(rw)
+    sig.rows[0].cells[0].width = Cm(cw - rw)
+    sig.rows[0].cells[1].width = Cm(rw)
+    _nowrap(sig.rows[0].cells[1])
     cell = sig.rows[0].cells[1]
     lines = [f"Bangka Selatan, {d['tanggal']}", "Pelaksana Perjalanan Dinas", "", "", "",
              sign_name(d["nama"]), f"NIP. {d['nip']}"]
@@ -521,7 +543,8 @@ def build_pdf(d, paper="A4"):
     story.append(Spacer(1, 14))
     right = [Paragraph(f"Toboali, {d['tanggal']}", S["center"]), Paragraph("Pelaksana SPD", S["center"]),
              Spacer(1, 60), Paragraph(escape(d["nama"]), S["center"]), Paragraph(f"NIP. {d['nip']}", S["center"])]
-    story.append(_sig_table(right, cw - 7.5, 7.5))
+    rw = sig_width([f"Toboali, {d['tanggal']}", d["nama"], f"NIP. {d['nip']}"], cw, 7.5)
+    story.append(_sig_table(right, cw - rw, rw))
     doc.build(story)
     return buf.getvalue()
 
@@ -540,7 +563,8 @@ def build_super_pdf(d, paper="A4"):
     right = [Paragraph(f"Bangka Selatan, {d['tanggal']}", S["base"]),
              Paragraph("Pelaksana Perjalanan Dinas", S["base"]), Spacer(1, 50),
              Paragraph(escape(sign_name(d["nama"])), S["base"]), Paragraph(f"NIP. {d['nip']}", S["base"])]
-    story.append(_sig_table(right, cw - 6.5, 6.5))
+    rw = sig_width([f"Bangka Selatan, {d['tanggal']}", sign_name(d["nama"]), f"NIP. {d['nip']}"], cw, 6.5)
+    story.append(_sig_table(right, cw - rw, rw))
 
     def qr(canvas, _doc):
         if QR_PATH.exists():
