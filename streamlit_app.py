@@ -256,6 +256,21 @@ def process_photo_bytes(data: bytes):
     return buf.getvalue(), w_cm, h_cm
 
 
+def scale_photos(photos, width_cm, max_h_cm, paper="A4"):
+    """Atur ukuran foto: lebar = width_cm, tinggi dibatasi max_h_cm, tidak melebihi lebar halaman."""
+    cw = PAPER[paper][0] - 2 * MARGIN_LR
+    out = []
+    for b, w, h in photos:
+        ratio = h / w
+        nw = min(width_cm, cw)
+        nh = nw * ratio
+        if nh > max_h_cm:
+            nh = max_h_cm
+            nw = nh / ratio
+        out.append((b, nw, nh))
+    return out
+
+
 def make_vars(rec):
     label, suffix = survei_label(rec["survei"], rec["tahun"], rec.get("triwulan"),
                                  rec.get("subround"), rec.get("jenis"))
@@ -375,7 +390,7 @@ def build_docx(d, paper="A4"):
     sig.rows[0].cells[0].width = Cm(cw - 7.5)
     sig.rows[0].cells[1].width = Cm(7.5)
     cell = sig.rows[0].cells[1]
-    lines = [f"Toboali, {d['tanggal']}", "Pelaksana SPD", "", "", "", "", "", d["nama"], f"NIP. {d['nip']}"]
+    lines = [f"Toboali, {d['tanggal']}", "Pelaksana SPD", "", "", "", "", d["nama"], f"NIP. {d['nip']}"]
     for i, ln in enumerate(lines):
         par = cell.paragraphs[0] if i == 0 else cell.add_paragraph()
         _fmt(par)
@@ -496,7 +511,7 @@ def build_pdf(d, paper="A4"):
         story.append(Spacer(1, 6))
     story.append(Spacer(1, 14))
     right = [Paragraph(f"Toboali, {d['tanggal']}", S["center"]), Paragraph("Pelaksana SPD", S["center"]),
-             Spacer(1, 75), Paragraph(escape(d["nama"]), S["center"]), Paragraph(f"NIP. {d['nip']}", S["center"])]
+             Spacer(1, 60), Paragraph(escape(d["nama"]), S["center"]), Paragraph(f"NIP. {d['nip']}", S["center"])]
     story.append(_sig_table(right, cw - 7.5, 7.5))
     doc.build(story)
     return buf.getvalue()
@@ -1009,7 +1024,7 @@ def cb_reset_texts():
     st.session_state["lap_sig"] = None
 
 
-def page_laporan(paper, use_kop):
+def page_laporan(paper, use_kop, photo_w, photo_h):
     ss = st.session_state
     st.title("📝 Laporan Perjalanan Translok")
     col_form, col_prev = st.columns([1, 1.15], gap="large")
@@ -1066,6 +1081,7 @@ def page_laporan(paper, use_kop):
                 photos.append(process_photo_bytes(f.getvalue()))
             except Exception:
                 perr.append(f"Foto '{f.name}' tidak bisa dibaca.")
+        photos = scale_photos(photos, photo_w, photo_h, paper)
         mode_single = True
         if len(photos) > 1:
             mode = st.radio("Gambar lebih dari 1, apakah akan dimasukkan ke dalam 1 dokumen yang sama? "
@@ -1162,7 +1178,7 @@ def cb_add_doc_point(idx):
     ss[f"xl_dnew_{idx}"] = ""
 
 
-def page_excel(paper, use_kop):
+def page_excel(paper, use_kop, photo_w, photo_h):
     ss = st.session_state
     st.title("📊 Generate Laporan dari Excel")
 
@@ -1230,7 +1246,7 @@ def page_excel(paper, use_kop):
                         except Exception:
                             warns.append(f"Baris {rec['row']}: foto '{fn}' tidak bisa dibaca.")
                 left |= placeholders_left(perihal + " " + " ".join(points))
-                d = doc_data(rec, v, perihal, points, ph, use_kop)
+                d = doc_data(rec, v, perihal, points, scale_photos(ph, photo_w, photo_h, paper), use_kop)
                 docs.append(dict(name=f"{i:02d}_{safe(v['tanggal'])}_{safe(v['kecamatan'])}_{safe(rec['pcl'])}",
                                  label=f"Baris {rec['row']} – {rec['pcl']} – {v['kecamatan']}", d=d, v=v))
                 prog.progress(i / len(recs))
@@ -1362,12 +1378,16 @@ with st.sidebar:
     st.divider()
     paper = st.selectbox("Ukuran kertas", list(PAPER), index=0)
     use_kop = st.checkbox("Pakai kop surat di laporan", value=True)
+    st.subheader("Ukuran foto dokumentasi")
+    photo_w = st.slider("Lebar foto (cm)", 3.0, 16.0, 8.5, 0.5)
+    photo_h = st.slider("Tinggi maksimal foto (cm)", 3.0, 20.0, 9.5, 0.5,
+                        help="Foto yang terlalu tinggi otomatis diperkecil proporsional.")
     if (use_kop and not KOP_PATH.exists()) or not QR_PATH.exists():
         st.warning("Folder 'assets' (kop.png & qr.png) belum ada di repo.")
 
 if menu.startswith("Laporan"):
-    page_laporan(paper, use_kop)
+    page_laporan(paper, use_kop, photo_w, photo_h)
 elif menu.startswith("Generate"):
-    page_excel(paper, use_kop)
+    page_excel(paper, use_kop, photo_w, photo_h)
 else:
     page_super(paper)
