@@ -20,6 +20,7 @@ from docx.shared import Cm, Pt
 
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.utils import ImageReader
 from reportlab.lib.units import cm
 from reportlab.platypus import (Image as RLImage, KeepTogether, Paragraph,
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
@@ -171,6 +172,10 @@ MARGIN_LR = 2.5
 
 POS_OPTIONS = ["Tetap pada urutan semestinya (sebelum Dokumentasi)",
                "Sisipkan setelah poin 1", "Sisipkan setelah poin 2", "Sisipkan setelah poin 3"]
+IND_OPTS = ["Sama dengan paragraf lain (rata kiri)", "Menjorok sedikit"]
+INDENT_CM = 0.75
+GRAY_LABEL = "Grayscale (hitam-putih)"
+COLOR_OPTS = ["Berwarna", GRAY_LABEL]
 
 DEFAULT_STYLE = {
     "Listing": {
@@ -263,6 +268,17 @@ def to_gray_bytes(data: bytes):
     return buf.getvalue()
 
 
+@st.cache_data(show_spinner=False)
+def gray_png_bytes(path: str):
+    buf = io.BytesIO()
+    Image.open(path).convert("L").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def is_gray(key):
+    return st.session_state.get(key) == GRAY_LABEL
+
+
 def scale_photos(photos, width_cm, max_h_cm, paper="A4"):
     """Atur ukuran foto: lebar = width_cm, tinggi dibatasi max_h_cm, tidak melebihi lebar halaman."""
     cw = PAPER[paper][0] - 2 * MARGIN_LR
@@ -274,8 +290,6 @@ def scale_photos(photos, width_cm, max_h_cm, paper="A4"):
         if nh > max_h_cm:
             nh = max_h_cm
             nw = nh / ratio
-        if st.session_state.get("photo_color") == "Grayscale (hitam-putih)":
-            b = to_gray_bytes(b)
         out.append((b, nw, nh))
     return out
 
@@ -295,12 +309,13 @@ def make_vars(rec):
 
 
 def assemble_points(texts, extras, v):
+    """List dict {t, num, ind}. Poin utama bernomor otomatis; poin tambahan TIDAK (user menomori sendiri)."""
     out = []
     for k in (1, 2, 3):
-        out.append(texts[k - 1])
-        out += [render_tpl(e["text"], v) for e in extras if e["after"] == k]
-        if k == 3:
-            out += [render_tpl(e["text"], v) for e in extras if e["after"] == 0]
+        out.append({"t": texts[k - 1], "num": True, "ind": False})
+        for e in extras:  # urutan sesuai waktu dimasukkan
+            if e["after"] == k or (k == 3 and e["after"] == 0):
+                out.append({"t": render_tpl(e["text"], v), "num": False, "ind": bool(e.get("indent"))})
     return out
 
 
@@ -376,12 +391,28 @@ def _nowrap(cell):
     tcpr.append(OxmlElement("w:noWrap"))
 
 
-def build_docx(d, paper="A4"):
+def numbered_points(d):
+    """[(teks, menjorok)]: nomor hanya untuk poin utama; 'Dokumentasi' menyusul nomor berikutnya."""
+    out, n = [], 0
+    for p in d["points"]:
+        if not p["t"].strip():
+            continue
+        if p["num"]:
+            n += 1
+            out.append((f"{n}. {p['t']}", p["ind"]))
+        else:
+            out.append((p["t"], p["ind"]))
+    out.append((f"{n + 1}. Dokumentasi:", False))
+    return out
+
+
+def build_docx(d, paper="A4", gray=False):
     doc, sec, cw = _setup_doc(paper)
     if d["kop"] and KOP_PATH.exists():
         p = doc.add_paragraph()
         _fmt(p, 14)
-        p.add_run().add_picture(str(KOP_PATH), width=Cm(KOP_WIDTH_CM))
+        p.add_run().add_picture(io.BytesIO(gray_png_bytes(str(KOP_PATH))) if gray else str(KOP_PATH),
+                                width=Cm(KOP_WIDTH_CM))
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _font(p.add_run("Laporan Perjalanan Translok"), 13, bold=True, underline=True)
@@ -394,14 +425,16 @@ def build_docx(d, paper="A4"):
     p = doc.add_paragraph()
     _runs(p, "Hasil Pelaksanaan")
     _fmt(p, 2)
-    n = 0
-    for txt in [p for p in d["points"] if p.strip()] + ["Dokumentasi:"]:
-        n += 1
+    for txt, ind in numbered_points(d):
         par = doc.add_paragraph()
         _fmt(par, 3, justify=True)
+        if ind:
+            par.paragraph_format.left_indent = Cm(INDENT_CM)
         par.paragraph_format.keep_together = True
-        _runs(par, f"{n}. {txt}")
+        _runs(par, txt)
     for img_bytes, w_cm, h_cm in d["photos"]:
+        if gray:
+            img_bytes = to_gray_bytes(img_bytes)
         par = doc.add_paragraph()
         _fmt(par, 4)
         par.add_run().add_picture(io.BytesIO(img_bytes), width=Cm(w_cm), height=Cm(h_cm))
@@ -429,7 +462,7 @@ def build_docx(d, paper="A4"):
     return out.getvalue()
 
 
-def build_super_docx(d, paper="A4"):
+def build_super_docx(d, paper="A4", gray=False):
     doc, sec, cw = _setup_doc(paper)
     if QR_PATH.exists():
         sec.footer_distance = Cm(0.6)
@@ -437,7 +470,8 @@ def build_super_docx(d, paper="A4"):
         fp = sec.footer.paragraphs[0]
         _fmt(fp)
         fp.paragraph_format.left_indent = Cm(-1.5)
-        fp.add_run().add_picture(str(QR_PATH), width=Cm(2.0))
+        fp.add_run().add_picture(io.BytesIO(gray_png_bytes(str(QR_PATH))) if gray else str(QR_PATH),
+                                 width=Cm(2.0))
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _font(p.add_run("SURAT PERNYATAAN"), 13, bold=True)
@@ -491,6 +525,7 @@ def _styles():
         base=base,
         title=ParagraphStyle("t", parent=base, fontName="Times-Bold", fontSize=13, alignment=TA_CENTER, spaceAfter=20),
         just=ParagraphStyle("j", parent=base, alignment=TA_JUSTIFY, spaceAfter=3),
+        just_ind=ParagraphStyle("ji", parent=base, alignment=TA_JUSTIFY, spaceAfter=3, leftIndent=INDENT_CM * cm),
         just10=ParagraphStyle("j10", parent=base, alignment=TA_JUSTIFY, spaceAfter=10),
         center=ParagraphStyle("c", parent=base, alignment=TA_CENTER),
     )
@@ -520,24 +555,25 @@ def _pdf_doc(buf, paper, title):
                              title=title), w - 2 * MARGIN_LR
 
 
-def build_pdf(d, paper="A4"):
+def build_pdf(d, paper="A4", gray=False):
     buf = io.BytesIO()
     doc, cw = _pdf_doc(buf, paper, "Laporan Perjalanan Translok")
     S = _styles()
     story = []
     if d["kop"] and KOP_PATH.exists():
         iw, ih = Image.open(KOP_PATH).size
-        story += [RLImage(str(KOP_PATH), width=KOP_WIDTH_CM * cm, height=KOP_WIDTH_CM * cm * ih / iw, hAlign="LEFT"),
+        kop_src = io.BytesIO(gray_png_bytes(str(KOP_PATH))) if gray else str(KOP_PATH)
+        story += [RLImage(kop_src, width=KOP_WIDTH_CM * cm, height=KOP_WIDTH_CM * cm * ih / iw, hAlign="LEFT"),
                   Spacer(1, 14)]
     story.append(Paragraph("<u>Laporan Perjalanan Translok</u>", S["title"]))
     story += [_kv_flow([("Kepada", d["kepada"]), ("Perihal", d["perihal"]), ("Tujuan", d["tujuan"]),
                         ("Tanggal Pelaksanaan", d["tanggal"])], [4.2, 0.4, cw - 4.6]),
               Spacer(1, 14), Paragraph("Hasil Pelaksanaan", S["base"]), Spacer(1, 2)]
-    n = 0
-    for txt in [p for p in d["points"] if p.strip()] + ["Dokumentasi:"]:
-        n += 1
-        story.append(Paragraph(f"{n}. {_rl(txt)}", S["just"]))
+    for txt, ind in numbered_points(d):
+        story.append(Paragraph(_rl(txt), S["just_ind"] if ind else S["just"]))
     for img_bytes, w_cm, h_cm in d["photos"]:
+        if gray:
+            img_bytes = to_gray_bytes(img_bytes)
         story.append(RLImage(io.BytesIO(img_bytes), width=w_cm * cm, height=h_cm * cm, hAlign="LEFT"))
         story.append(Spacer(1, 6))
     story.append(Spacer(1, 14))
@@ -549,7 +585,7 @@ def build_pdf(d, paper="A4"):
     return buf.getvalue()
 
 
-def build_super_pdf(d, paper="A4"):
+def build_super_pdf(d, paper="A4", gray=False):
     buf = io.BytesIO()
     doc, cw = _pdf_doc(buf, paper, "Surat Pernyataan")
     S = _styles()
@@ -568,7 +604,8 @@ def build_super_pdf(d, paper="A4"):
 
     def qr(canvas, _doc):
         if QR_PATH.exists():
-            canvas.drawImage(str(QR_PATH), 1 * cm, 0.8 * cm, 2 * cm, 2 * cm, mask="auto")
+            src = ImageReader(io.BytesIO(gray_png_bytes(str(QR_PATH)))) if gray else str(QR_PATH)
+            canvas.drawImage(src, 1 * cm, 0.8 * cm, 2 * cm, 2 * cm, mask="auto")
 
     doc.build(story, onFirstPage=qr, onLaterPages=qr)
     return buf.getvalue()
@@ -851,7 +888,7 @@ def reset_inputs(prefixes, counter=None, extra_del=()):
 LAP_INPUTS = ("lap_kegiatan", "lap_tahun", "lap_survei", "lap_subround", "lap_jenis", "lap_triwulan",
               "lap_kec", "lap_desa_", "lap_sls", "lap_pcl", "lap_resp", "lap_tgl_", "lap_pel",
               "lap_files_", "lap_mode", "lap_var_")
-SP_INPUTS = ("sp_peg", "sp_nomor", "sp_tgl")
+SP_INPUTS = ("sp_peg", "sp_nomor", "sp_tgl", "sp_mode", "sp_rng", "sp_ttd_")
 
 
 def restore(keys):
@@ -1001,7 +1038,8 @@ def cb_add_point(prefix):
     txt = (ss.get(f"{prefix}_newpoint") or "").strip()
     if txt:
         ss.setdefault(f"{prefix}_extras", []).append(
-            {"text": txt, "after": POS_OPTIONS.index(ss.get(f"{prefix}_newpos", POS_OPTIONS[0]))})
+            {"text": txt, "after": POS_OPTIONS.index(ss.get(f"{prefix}_newpos", POS_OPTIONS[0])),
+             "indent": ss.get(f"{prefix}_newind", IND_OPTS[0]) == IND_OPTS[1]})
         ss[f"{prefix}_newpoint"] = ""
 
 
@@ -1013,19 +1051,22 @@ def points_editor(prefix):
     ss = st.session_state
     n = len(ss["extra_vars"])
     st.markdown("**Tambah poin uraian**")
+    st.caption("Poin tambahan TIDAK diberi nomor otomatis. Ketik sendiri penomorannya, mis. 'a) ...' atau 'a. ...'. "
+               "Urutan mengikuti waktu dimasukkan (yang pertama dimasukkan tampil lebih dulu).")
     st.text_area("Uraian poin tambahan (boleh memakai variabel)", key=f"{prefix}_newpoint", height=80,
-                 placeholder="mis. Pada keluarga {nama_responden} terdapat {nama_anggota} dengan komoditas utamanya {komoditas}")
+                 placeholder="a) Pada keluarga {nama_responden} terdapat {nama_anggota} dengan komoditas utamanya {komoditas}")
     c1, c2 = st.columns([3, 2])
     c1.selectbox("Variabel yang disisipkan", all_var_names(), key=f"{prefix}_insvar_{n}")
     c2.markdown("<div style='height:1.9em'></div>", unsafe_allow_html=True)
     c2.button("↳ Sisipkan variabel", on_click=cb_insert_var, args=(prefix, n), key=f"btn_insvar_{prefix}")
     st.selectbox("Posisi poin", POS_OPTIONS, key=f"{prefix}_newpos",
                  help="Sisipkan setelah poin x, atau biarkan pada urutan semestinya.")
+    st.radio("Tata letak poin", IND_OPTS, horizontal=True, key=f"{prefix}_newind")
     st.button("➕ Tambah poin", on_click=cb_add_point, args=(prefix,), key=f"btn_addpoint_{prefix}")
     for i, e in enumerate(ss.get(f"{prefix}_extras", [])):
         a, b = st.columns([6, 1])
         pos = "urutan semestinya" if e["after"] == 0 else f"setelah poin {e['after']}"
-        a.caption(f"• ({pos}) {e['text']}")
+        a.caption(f"• ({pos}{', menjorok' if e.get('indent') else ''}) {e['text']}")
         b.button("🗑️", key=f"btn_delpoint_{prefix}_{i}", on_click=cb_del_point, args=(prefix, i))
 
 
@@ -1033,14 +1074,16 @@ def points_editor(prefix):
 # DOWNLOAD
 # ----------------------------------------------------------------------------
 def download_block(docs, paper, key, base_name):
-    fmt = st.radio("Pilih format download", ["PDF", "Word (.docx)", "PDF + Word"], horizontal=True, key=key + "_fmt")
+    c1, c2 = st.columns(2)
+    fmt = c1.radio("Pilih format download", ["PDF", "Word (.docx)", "PDF + Word"], horizontal=True, key=key + "_fmt")
+    gray = c2.radio("Warna dokumen", COLOR_OPTS, horizontal=True, key=key + "_color") == GRAY_LABEL
     files = []
     for i, (label, d) in enumerate(docs, 1):
         nm = base_name if len(docs) == 1 else f"{base_name}_{i:02d}"
         if fmt in ("PDF", "PDF + Word"):
             files.append((nm + ".pdf", d["_pdf"]))
         if fmt in ("Word (.docx)", "PDF + Word"):
-            files.append((nm + ".docx", build_docx(d, paper)))
+            files.append((nm + ".docx", build_docx(d, paper, gray)))
     if len(files) == 1:
         n, data = files[0]
         st.download_button("⬇️ Download " + n.rsplit(".", 1)[1].upper(), data, file_name=n,
@@ -1161,15 +1204,14 @@ def page_laporan(paper, use_kop, photo_w, photo_h):
             points_editor("lap")
 
         points = assemble_points([ss["lap_f_p1"], ss["lap_f_p2"], ss["lap_f_p3"]], ss.get("lap_extras", []), v)
-        left = placeholders_left(ss["lap_f_perihal"] + " " + " ".join(points))
+        left = placeholders_left(ss["lap_f_perihal"] + " " + " ".join(p["t"] for p in points))
         if left:
             st.warning("Variabel belum terisi/terdefinisi: " + ", ".join("{" + x + "}" for x in sorted(left)))
-        empty = [x for x in placeholders_left(" ".join(points)) if x in extra and not extra[x]]
         groups = [photos] if (mode_single or len(photos) <= 1) else [[p] for p in photos]
         docs = []
         for g in groups:
             d = doc_data(rec, v, ss["lap_f_perihal"], points, g, use_kop)
-            d["_pdf"] = build_pdf(d, paper)
+            d["_pdf"] = build_pdf(d, paper, is_gray("lap_color"))
             docs.append((f"Dokumen {len(docs) + 1}", d))
         for label, d in docs:
             if len(docs) > 1:
@@ -1201,11 +1243,12 @@ def cb_add_doc_point(idx):
     if not txt:
         return
     pos = ss.get(f"xl_dpos_{idx}_{n}", 0)
-    txt = render_tpl(txt, item["v"])
+    new = {"t": render_tpl(txt, item["v"]), "num": False,
+           "ind": ss.get(f"xl_dind_{idx}", IND_OPTS[0]) == IND_OPTS[1]}
     if pos == 0:
-        d["points"].append(txt)
+        d["points"].append(new)
     else:
-        d["points"].insert(pos, txt)
+        d["points"].insert(pos, new)
     ss["xl_edver"] += 1
     ss["xl_zip"] = None
     ss[f"xl_dnew_{idx}"] = ""
@@ -1278,7 +1321,7 @@ def page_excel(paper, use_kop, photo_w, photo_h):
                             ph.append(process_photo_bytes(f.getvalue()))
                         except Exception:
                             warns.append(f"Baris {rec['row']}: foto '{fn}' tidak bisa dibaca.")
-                left |= placeholders_left(perihal + " " + " ".join(points))
+                left |= placeholders_left(perihal + " " + " ".join(p["t"] for p in points))
                 d = doc_data(rec, v, perihal, points, scale_photos(ph, photo_w, photo_h, paper), use_kop)
                 docs.append(dict(name=f"{i:02d}_{safe(v['tanggal'])}_{safe(v['kecamatan'])}_{safe(rec['pcl'])}",
                                  label=f"Baris {rec['row']} – {rec['pcl']} – {v['kecamatan']}", d=d, v=v))
@@ -1304,40 +1347,55 @@ def page_excel(paper, use_kop, photo_w, photo_h):
     with ce:
         with st.expander("✏️ Edit dokumen ini (hanya dokumen terpilih)", expanded=True):
             np_ = st.text_area("Perihal", d["perihal"], key=f"xled_{ev}_{idx}_perihal", height=80)
-            pts = [st.text_area(f"Poin {j + 1}", p, key=f"xled_{ev}_{idx}_p{j}", height=110)
-                   for j, p in enumerate(d["points"])]
-            if np_ != d["perihal"] or pts != d["points"]:
-                d["perihal"], d["points"] = np_, pts
+            changed = np_ != d["perihal"]
+            d["perihal"] = np_
+            nnum = 0
+            for j, p in enumerate(d["points"]):
+                if p["num"]:
+                    nnum += 1
+                    lbl = f"Poin {nnum}"
+                else:
+                    lbl = f"Poin tambahan (baris {j + 1})"
+                new = st.text_area(lbl, p["t"], key=f"xled_{ev}_{idx}_p{j}", height=110)
+                if new != p["t"]:
+                    p["t"] = new
+                    changed = True
+            if changed:
                 ss["xl_zip"] = None
             st.caption("Kosongkan teks sebuah poin untuk menghapusnya dari dokumen.")
             st.divider()
-            st.text_area("Tambah poin untuk dokumen ini (boleh memakai variabel)", key=f"xl_dnew_{idx}", height=80)
+            st.text_area("Tambah poin untuk dokumen ini (tanpa nomor otomatis; ketik sendiri 'a)' atau 'a.')",
+                         key=f"xl_dnew_{idx}", height=80)
             n = len(d["points"])
-            opts = [POS_OPTIONS[0]] + [f"Sisipkan setelah poin {j}" for j in range(1, n + 1)]
+            opts = [POS_OPTIONS[0]] + [f"Sisipkan setelah: {d['points'][j - 1]['t'][:35]}…" for j in range(1, n + 1)]
             st.selectbox("Posisi poin", range(len(opts)), format_func=lambda i: opts[i], key=f"xl_dpos_{idx}_{n}")
+            st.radio("Tata letak poin", IND_OPTS, horizontal=True, key=f"xl_dind_{idx}")
             st.button("➕ Tambah poin ke dokumen ini", on_click=cb_add_doc_point, args=(idx,),
                       key=f"btn_adddoc_{idx}")
     with cp:
         st.markdown("**Preview**")
-        for png in render_preview(build_pdf(d, paper)):
+        for png in render_preview(build_pdf(d, paper, is_gray("xl_color"))):
             st.image(png, use_container_width=True)
 
     st.markdown("#### 4. Download")
-    fmt = st.radio("Format hasil", ["PDF", "Word (.docx)", "PDF + Word"], horizontal=True, key="xl_fmt")
+    c3, c4 = st.columns(2)
+    fmt = c3.radio("Format hasil", ["PDF", "Word (.docx)", "PDF + Word"], horizontal=True, key="xl_fmt")
+    gray = c4.radio("Warna dokumen", COLOR_OPTS, horizontal=True, key="xl_color") == GRAY_LABEL
     if st.button("📦 Siapkan file untuk download", key="btn_zip"):
         files = []
         with st.spinner("Membuat file..."):
             for it in docs:
                 if fmt in ("PDF", "PDF + Word"):
-                    files.append((it["name"] + ".pdf", build_pdf(it["d"], paper)))
+                    files.append((it["name"] + ".pdf", build_pdf(it["d"], paper, gray)))
                 if fmt in ("Word (.docx)", "PDF + Word"):
-                    files.append((it["name"] + ".docx", build_docx(it["d"], paper)))
+                    files.append((it["name"] + ".docx", build_docx(it["d"], paper, gray)))
         ss["xl_zip"] = zip_files(files)
-    if ss.get("xl_zip"):
+        ss["xl_zip_cfg"] = (fmt, gray)
+    if ss.get("xl_zip") and ss.get("xl_zip_cfg") == (fmt, gray):
         st.download_button("⬇️ Download semua (ZIP)", ss["xl_zip"], file_name="Laporan_Translok_dari_Excel.zip",
                            mime="application/zip", type="primary", key="dl_xl_zip")
     else:
-        st.caption("Klik 'Siapkan file untuk download' (diulang bila ada edit baru).")
+        st.caption("Klik 'Siapkan file untuk download' (diulang bila ada edit, atau format/warna diubah).")
 
 
 # ----------------------------------------------------------------------------
@@ -1347,10 +1405,23 @@ def cb_reset_super_text():
     st.session_state["sp_sig"] = None
 
 
+def fmt_range(a, b):
+    if a == b:
+        return tgl_id(a)
+    if a.year == b.year and a.month == b.month:
+        return f"{a.day} s.d. {b.day} {BULAN[a.month - 1]} {a.year}"
+    if a.year == b.year:
+        return f"{a.day} {BULAN[a.month - 1]} s.d. {b.day} {BULAN[b.month - 1]} {b.year}"
+    return f"{tgl_id(a)} s.d. {tgl_id(b)}"
+
+
 def page_super(paper):
     ss = st.session_state
     st.title("🚗 Surat Pernyataan Tidak Menggunakan Kendaraan Dinas (Super)")
     col_form, col_prev = st.columns([1, 1.15], gap="large")
+    tgl_par = tgl_ttd = ttd_date = None
+    lo, hi = date(2026, 1, 1), date(2030, 12, 31)
+    base_day = min(max(date.today(), lo), hi)
     with col_form:
         h1, h2 = st.columns([2, 1])
         h1.subheader("1. Isi Data")
@@ -1364,18 +1435,38 @@ def page_super(paper):
         st.text_input("Pangkat/Golongan", pg, disabled=True, key=f"sp_pg_{idx}")
         st.text_input("Jabatan", peg["jabatan"], disabled=True, key=f"sp_jab_{idx}")
         nomor = st.text_input("Nomor Surat Tugas", key="sp_nomor", placeholder="B-1430/01905-ST/KP.650/2026")
-        tgl = st.date_input("Pilih Tanggal (pelaksanaan & tanda tangan)", value=date.today(),
-                            min_value=date(2026, 1, 1), max_value=date(2030, 12, 31), key="sp_tgl", format="DD/MM/YYYY")
+        mode = st.radio("Tanggal pelaksanaan", ["Satu tanggal", "Rentang tanggal"], horizontal=True, key="sp_mode",
+                        help="Satu tanggal: tanggal di paragraf dan tanda tangan sama. "
+                             "Rentang: tanggal tanda tangan diisi terpisah (tanggal terakhir pengawasan).")
+        if mode == "Satu tanggal":
+            ttd_date = st.date_input("Pilih Tanggal (pelaksanaan & tanda tangan)", value=base_day,
+                                     min_value=lo, max_value=hi, key="sp_tgl", format="DD/MM/YYYY")
+            tgl_par = tgl_ttd = tgl_id(ttd_date)
+        else:
+            rng = st.date_input("Pilih rentang tanggal pelaksanaan (awal lalu akhir)", value=(base_day, base_day),
+                                min_value=lo, max_value=hi, key="sp_rng", format="DD/MM/YYYY")
+            if isinstance(rng, (tuple, list)) and len(rng) == 2:
+                a, b = rng
+                tgl_par = fmt_range(a, b)
+                ttd_date = st.date_input("Masukkan tanggal terakhir pengawasan (untuk tanda tangan)", value=b,
+                                         min_value=a, max_value=hi, key=f"sp_ttd_{b.isoformat()}",
+                                         format="DD/MM/YYYY")
+                tgl_ttd = tgl_id(ttd_date)
+                st.caption(f"Tanggal di paragraf: **{tgl_par}** · Tanggal di tanda tangan: **{tgl_ttd}**")
+            else:
+                st.info("Pilih tanggal awal dan tanggal akhir rentang.")
     with col_prev:
         st.subheader("2. Preview & Edit")
         if not nomor.strip():
             st.info("Isi Nomor Surat Tugas untuk menampilkan preview.")
             return
-        tgl_s = tgl_id(tgl)
+        if tgl_par is None:
+            st.info("Lengkapi rentang tanggal untuk menampilkan preview.")
+            return
         auto1 = (f"Menerangkan bahwa dalam rangka melaksanakan perjalanan dinas untuk melaksanakan tugas "
-                 f"kedinasan sesuai surat tugas Nomor : {nomor.strip()} pelaksanaan tanggal {tgl_s}, "
+                 f"kedinasan sesuai surat tugas Nomor : {nomor.strip()} pelaksanaan tanggal {tgl_par}, "
                  f"saya benar-benar tidak menggunakan kendaraan dinas.")
-        sig = (nomor, tgl_s)
+        sig = (nomor, tgl_par, tgl_ttd)
         if ss.get("sp_sig") != sig:
             ss["sp_sig"] = sig
             ss["sp_p1"], ss["sp_p2"] = auto1, SUPER_P2
@@ -1383,19 +1474,21 @@ def page_super(paper):
             st.text_area("Paragraf 1", key="sp_p1", height=110)
             st.text_area("Paragraf 2", key="sp_p2", height=140)
             st.button("↩️ Kembalikan ke teks otomatis", on_click=cb_reset_super_text, key="btn_reset_sp_text")
-        d = dict(nama=peg["nama"], nip=peg["nip"], pangkat_gol=pg, jabatan=peg["jabatan"], tanggal=tgl_s,
+        d = dict(nama=peg["nama"], nip=peg["nip"], pangkat_gol=pg, jabatan=peg["jabatan"], tanggal=tgl_ttd,
                  p1=ss["sp_p1"], p2=ss["sp_p2"])
-        pdf = build_super_pdf(d, paper)
+        pdf = build_super_pdf(d, paper, is_gray("sp_color"))
         for png in render_preview(pdf):
             st.image(png, use_container_width=True)
         st.subheader("3. Download")
-        fmt = st.radio("Pilih format download", ["PDF", "Word (.docx)"], horizontal=True, key="sp_fmt")
-        base = f"Super_{safe(peg['nama'])}_{tgl.strftime('%Y-%m-%d')}"
+        c1, c2 = st.columns(2)
+        fmt = c1.radio("Pilih format download", ["PDF", "Word (.docx)"], horizontal=True, key="sp_fmt")
+        gray = c2.radio("Warna dokumen", COLOR_OPTS, horizontal=True, key="sp_color") == GRAY_LABEL
+        base = f"Super_{safe(peg['nama'])}_{ttd_date.strftime('%Y-%m-%d')}"
         if fmt == "PDF":
             st.download_button("⬇️ Download PDF", pdf, file_name=base + ".pdf", mime="application/pdf",
                                type="primary", key="sp_dl_pdf")
         else:
-            st.download_button("⬇️ Download Word", build_super_docx(d, paper), file_name=base + ".docx",
+            st.download_button("⬇️ Download Word", build_super_docx(d, paper, gray), file_name=base + ".docx",
                                mime=DOCX_MIME, type="primary", key="sp_dl_docx")
 
 
@@ -1411,8 +1504,7 @@ with st.sidebar:
     st.divider()
     paper = st.selectbox("Ukuran kertas", list(PAPER), index=0)
     use_kop = st.checkbox("Pakai kop surat di laporan", value=True)
-    st.subheader("Ukuran & warna foto dokumentasi")
-    st.radio("Warna foto", ["Berwarna", "Grayscale (hitam-putih)"], horizontal=True, key="photo_color")
+    st.subheader("Ukuran foto dokumentasi")
     photo_w = st.slider("Lebar foto (cm)", 3.0, 16.0, 8.5, 0.5)
     photo_h = st.slider("Tinggi maksimal foto (cm)", 3.0, 20.0, 9.5, 0.5,
                         help="Foto yang terlalu tinggi otomatis diperkecil proporsional.")
