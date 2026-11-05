@@ -12,7 +12,7 @@ import streamlit as st
 from PIL import Image, ImageOps
 
 from docx import Document
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -176,6 +176,7 @@ IND_OPTS = ["Sama dengan paragraf lain (rata kiri)", "Menjorok sedikit"]
 INDENT_CM = 0.75
 GRAY_LABEL = "Grayscale (hitam-putih)"
 COLOR_OPTS = ["Berwarna", GRAY_LABEL]
+SIG_OPTS = ["Di bawah foto", "Di samping foto (sejajar bagian bawah foto)", "Di samping foto (sejajar bagian atas foto)"]
 
 DEFAULT_STYLE = {
     "Listing": {
@@ -406,6 +407,16 @@ def numbered_points(d):
     return out
 
 
+def side_mode(photos, cw, rw):
+    """None = tanda tangan di bawah foto; 'bottom'/'top' = di samping foto terakhir (jika muat)."""
+    lay = st.session_state.get("sig_layout", SIG_OPTS[1])
+    if not photos or lay == SIG_OPTS[0]:
+        return None
+    if photos[-1][1] > cw - rw + 0.01:  # foto terlalu lebar -> tidak muat di samping
+        return None
+    return "top" if lay == SIG_OPTS[2] else "bottom"
+
+
 def build_docx(d, paper="A4", gray=False):
     doc, sec, cw = _setup_doc(paper)
     if d["kop"] and KOP_PATH.exists():
@@ -425,35 +436,65 @@ def build_docx(d, paper="A4", gray=False):
     p = doc.add_paragraph()
     _runs(p, "Hasil Pelaksanaan")
     _fmt(p, 2)
-    for txt, ind in numbered_points(d):
+
+    items = numbered_points(d)
+    photos = [(to_gray_bytes(b) if gray else b, w, h) for b, w, h in d["photos"]]
+    rw = sig_width([f"Toboali, {d['tanggal']}", d["nama"], f"NIP. {d['nip']}"], cw, 7.5)
+    side = side_mode(photos, cw, rw)
+    lab_in = bool(side) and len(photos) == 1  # label masuk satu sel dengan foto
+
+    for i, (txt, ind) in enumerate(items):
+        is_label = i == len(items) - 1
+        if is_label and lab_in:
+            break
         par = doc.add_paragraph()
         _fmt(par, 3, justify=True)
         if ind:
             par.paragraph_format.left_indent = Cm(INDENT_CM)
         par.paragraph_format.keep_together = True
+        if is_label:  # "N. Dokumentasi:" selalu satu halaman dengan foto
+            par.paragraph_format.keep_with_next = True
         _runs(par, txt)
-    for img_bytes, w_cm, h_cm in d["photos"]:
-        if gray:
-            img_bytes = to_gray_bytes(img_bytes)
+
+    for img_bytes, w_cm, h_cm in (photos[:-1] if side else photos):
         par = doc.add_paragraph()
         _fmt(par, 4)
         par.add_run().add_picture(io.BytesIO(img_bytes), width=Cm(w_cm), height=Cm(h_cm))
-    sp = doc.add_paragraph()
-    _fmt(sp, 6)
+    if not side:
+        sp = doc.add_paragraph()
+        _fmt(sp, 6)
+
     sig = doc.add_table(rows=1, cols=2)
     sig.autofit = False
     sig.alignment = WD_TABLE_ALIGNMENT.LEFT
-    rw = sig_width([f"Toboali, {d['tanggal']}", d["nama"], f"NIP. {d['nip']}"], cw, 7.5)
     sig.columns[0].width = Cm(cw - rw)
     sig.columns[1].width = Cm(rw)
     sig.rows[0].cells[0].width = Cm(cw - rw)
     sig.rows[0].cells[1].width = Cm(rw)
     _nowrap(sig.rows[0].cells[1])
+    if side:
+        img_bytes, w_cm, h_cm = photos[-1]
+        lcell = sig.rows[0].cells[0]
+        if lab_in:
+            lab = lcell.paragraphs[0]
+            _fmt(lab, 3)
+            lab.paragraph_format.keep_with_next = True
+            _runs(lab, items[-1][0])
+            lpar = lcell.add_paragraph()
+        else:
+            lpar = lcell.paragraphs[0]
+        _fmt(lpar)
+        lpar.add_run().add_picture(io.BytesIO(img_bytes), width=Cm(w_cm), height=Cm(h_cm))
+        va = WD_ALIGN_VERTICAL.TOP if side == "top" else WD_ALIGN_VERTICAL.BOTTOM
+        sig.rows[0].cells[0].vertical_alignment = va
+        sig.rows[0].cells[1].vertical_alignment = va
     cell = sig.rows[0].cells[1]
     lines = [f"Toboali, {d['tanggal']}", "Pelaksana SPD", "", "", "", "", d["nama"], f"NIP. {d['nip']}"]
+    if lab_in and side == "top":
+        lines = [" "] + lines  # sejajarkan tanda tangan dengan atas foto (di bawah baris label)
     for i, ln in enumerate(lines):
         par = cell.paragraphs[0] if i == 0 else cell.add_paragraph()
-        _fmt(par)
+        _fmt(par, 3 if (lab_in and side == "top" and i == 0) else 0)
         par.alignment = WD_ALIGN_PARAGRAPH.CENTER
         _runs(par, ln)
     sig.rows[0]._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
@@ -569,18 +610,39 @@ def build_pdf(d, paper="A4", gray=False):
     story += [_kv_flow([("Kepada", d["kepada"]), ("Perihal", d["perihal"]), ("Tujuan", d["tujuan"]),
                         ("Tanggal Pelaksanaan", d["tanggal"])], [4.2, 0.4, cw - 4.6]),
               Spacer(1, 14), Paragraph("Hasil Pelaksanaan", S["base"]), Spacer(1, 2)]
-    for txt, ind in numbered_points(d):
+    items = numbered_points(d)
+    for txt, ind in items[:-1]:
         story.append(Paragraph(_rl(txt), S["just_ind"] if ind else S["just"]))
-    for img_bytes, w_cm, h_cm in d["photos"]:
-        if gray:
-            img_bytes = to_gray_bytes(img_bytes)
-        story.append(RLImage(io.BytesIO(img_bytes), width=w_cm * cm, height=h_cm * cm, hAlign="LEFT"))
-        story.append(Spacer(1, 6))
-    story.append(Spacer(1, 14))
+    label = Paragraph(_rl(items[-1][0]), S["just"])
+    photos = [(to_gray_bytes(b) if gray else b, w, h) for b, w, h in d["photos"]]
     right = [Paragraph(f"Toboali, {d['tanggal']}", S["center"]), Paragraph("Pelaksana SPD", S["center"]),
              Spacer(1, 60), Paragraph(escape(d["nama"]), S["center"]), Paragraph(f"NIP. {d['nip']}", S["center"])]
     rw = sig_width([f"Toboali, {d['tanggal']}", d["nama"], f"NIP. {d['nip']}"], cw, 7.5)
-    story.append(_sig_table(right, cw - rw, rw))
+    side = side_mode(photos, cw, rw)
+    lab_in = bool(side) and len(photos) == 1  # label masuk satu sel dengan foto
+    seq = []
+    for img_bytes, w_cm, h_cm in (photos[:-1] if side else photos):
+        seq += [RLImage(io.BytesIO(img_bytes), width=w_cm * cm, height=h_cm * cm, hAlign="LEFT"), Spacer(1, 6)]
+    if side:
+        img_bytes, w_cm, h_cm = photos[-1]
+        img = RLImage(io.BytesIO(img_bytes), width=w_cm * cm, height=h_cm * cm)
+        left = [label, img] if lab_in else img
+        rcell = ([Spacer(1, 18)] + right) if (lab_in and side == "top") else right
+        t = Table([[left, rcell]], colWidths=[(cw - rw) * cm, rw * cm], hAlign="LEFT")
+        t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP" if side == "top" else "BOTTOM"),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                               ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        seq.append(t)
+    if lab_in:  # label + foto + tanda tangan satu kesatuan, pindah halaman bersama
+        story.append(KeepTogether(seq))
+    elif seq:  # label selalu satu halaman dengan foto pertama
+        story.append(KeepTogether([label, seq[0]]))
+        story += seq[1:]
+    else:
+        story.append(label)
+    if not side:
+        story.append(Spacer(1, 14))
+        story.append(_sig_table(right, cw - rw, rw))
     doc.build(story)
     return buf.getvalue()
 
@@ -1504,7 +1566,10 @@ with st.sidebar:
     st.divider()
     paper = st.selectbox("Ukuran kertas", list(PAPER), index=0)
     use_kop = st.checkbox("Pakai kop surat di laporan", value=True)
-    st.subheader("Ukuran foto dokumentasi")
+    st.subheader("Foto & tanda tangan")
+    st.radio("Posisi tanda tangan", SIG_OPTS, index=1, key="sig_layout",
+             help="Di samping foto hanya berlaku jika foto + area tanda tangan muat selebar halaman; "
+                  "jika tidak, otomatis di bawah foto.")
     photo_w = st.slider("Lebar foto (cm)", 3.0, 16.0, 8.5, 0.5)
     photo_h = st.slider("Tinggi maksimal foto (cm)", 3.0, 20.0, 9.5, 0.5,
                         help="Foto yang terlalu tinggi otomatis diperkecil proporsional.")
