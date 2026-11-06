@@ -50,7 +50,7 @@ SURVEI = [
     "Survei IMK Triwulan B", "Survei IMK Tahunan", "Updating Perusahaan PE (Pertambangan Energi)",
     "Survei PE Tahunan (Survei Galian URT)", "Survei PE Tahunan (Survei Non Migas)",
     "Survei PE Tahunan (Survei Captive Power)", "Survei PE Tahunan (Survei Air Bersih)",
-    "Survei PE Triwulanan (Air Bersih) Triwulan B", "Pengutipan Direktori Konstruksi",
+    "Survei PE an (Air Bersih)  B", "Pengutipan Direktori Konstruksi",
     "Survei Konstruksi Tahunan", "Survei Kesejahteraan Petani (SKP)",
     "Survei Konstruksi Triwulanan Triwulan B",
 ]
@@ -193,7 +193,7 @@ DEFAULT_STYLE = {
     },
 }
 BASE_VARS = ["kegiatan", "survei", "survei_tahun", "tahun", "kecamatan", "desa", "sls", "pcl",
-             "responden", "tanggal", "hari", "bulan", "tahun_pelaksanaan", "pelaksana"; "triwulan"; "jenis_ubinan"; "subround"]
+             "responden", "tanggal", "hari", "bulan", "tahun_pelaksanaan", "pelaksana"]
 
 DEFAULT_COLS = ["Kegiatan", "Survei", "Tahun", "Subround", "Jenis Ubinan", "Triwulan", "Kecamatan",
                 "Desa", "Nama SLS/Sampel", "Nama PCL", "Nama Responden", "Tanggal Pelaksanaan",
