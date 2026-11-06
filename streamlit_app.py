@@ -193,7 +193,7 @@ DEFAULT_STYLE = {
     },
 }
 BASE_VARS = ["kegiatan", "survei", "survei_tahun", "tahun", "kecamatan", "desa", "sls", "pcl",
-             "responden", "tanggal", "hari", "bulan", "tahun_pelaksanaan", "pelaksana"]
+             "responden", "tanggal", "hari", "bulan", "tahun_pelaksanaan", "pelaksana"; "triwulan"; "jenis_ubinan"; "subround"]
 
 DEFAULT_COLS = ["Kegiatan", "Survei", "Tahun", "Subround", "Jenis Ubinan", "Triwulan", "Kecamatan",
                 "Desa", "Nama SLS/Sampel", "Nama PCL", "Nama Responden", "Tanggal Pelaksanaan",
