@@ -936,7 +936,7 @@ def init_state():
     ss.setdefault("applied_style", "Default")
     ss.setdefault("extra_vars", [])
     ss.setdefault("xl_edver", 0)
-    ss.setdefault("marked_dates", {})  # {"2026-04-24": {"notes": [...], "source": "manual|laporan|excel"}}
+    ss.setdefault("marked_dates", {})  # {"2026-04-24": {"note": "...", "source": "manual|laporan|excel"}}
 
 
 def reset_inputs(prefixes, counter=None, extra_del=()):
@@ -1135,24 +1135,36 @@ def points_editor(prefix):
 
 
 # ----------------------------------------------------------------------------
-# KALENDER PENANDAAN TANGGAL
+# KALENDER PENANDAAN TANGGAL  (1 tanggal = 1 penanda)
 # ----------------------------------------------------------------------------
 HARI_SINGKAT = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
 SRC_LABEL = {"manual": "Manual", "laporan": "Laporan dibuat", "excel": "Dari Excel"}
+NO_NOTE = "Tanpa deskripsi"
+
+
+def taken_msg(note):
+    return f'Sudah terisi "{note}" silakan ganti tanggal lain'
 
 
 def mark_dates(days, note="", source="manual"):
+    """Tandai tanggal. 1 tanggal hanya boleh 1 penanda: tanggal yang sudah terisi dilewati (tidak ditimpa).
+    Return (daftar tanggal yang baru ditandai, daftar (tanggal, penanda lama) yang dilewati)."""
     md = st.session_state["marked_dates"]
-    added = 0
+    added, skipped = [], []
     for d in days:
         k = d.isoformat()
         if k in md:
-            if note and note not in md[k]["notes"]:
-                md[k]["notes"].append(note)
+            skipped.append((d, md[k]["note"]))
         else:
-            md[k] = {"notes": [note] if note else [], "source": source}
-            added += 1
-    return added
+            md[k] = {"note": (note or "").strip() or NO_NOTE, "source": source}
+            added.append(d)
+    return added, skipped
+
+
+def skipped_text(skipped, limit=5):
+    items = [f'{tgl_id(d)} ("{n}")' for d, n in skipped[:limit]]
+    more = f", +{len(skipped) - limit} lainnya" if len(skipped) > limit else ""
+    return ", ".join(items) + more
 
 
 def rec_note(rec):
@@ -1162,13 +1174,11 @@ def rec_note(rec):
 def date_warning(d, container=st):
     e = st.session_state["marked_dates"].get(d.isoformat())
     if e:
-        extra = f" Catatan: {'; '.join(e['notes'])}." if e["notes"] else ""
-        container.warning(f"📅 Tanggal {tgl_id(d)} sudah pernah ditandai di kalender "
-                          f"({SRC_LABEL.get(e['source'], e['source'])}).{extra}")
+        container.warning(f"📅 {taken_msg(e['note'])}")
 
 
 def date_conflicts(recs):
-    """Tanggal dari Excel yang (a) sudah ada di kalender, atau (b) kembar dengan baris lain di Excel."""
+    """Tanggal dari Excel yang (a) sudah terisi penanda di kalender, atau (b) kembar dengan baris lain di Excel."""
     md = st.session_state["marked_dates"]
     by = {}
     for r in recs:
@@ -1178,7 +1188,7 @@ def date_conflicts(recs):
         why = []
         e = md.get(r["tanggal"].isoformat())
         if e:
-            why.append("Sudah ditandai di kalender" + (f" ({'; '.join(e['notes'])})" if e["notes"] else ""))
+            why.append(f'Sudah terisi penanda "{e["note"]}"')
         same = [str(x) for x in by[r["tanggal"]] if x != r["row"]]
         if same:
             why.append("Tanggal sama dengan baris " + ", ".join(same))
@@ -1187,34 +1197,60 @@ def date_conflicts(recs):
     return out
 
 
+def show_mark_msg():
+    msg = st.session_state.pop("mark_msg", None)
+    if msg:
+        {"success": st.success, "warning": st.warning, "error": st.error}[msg[0]](msg[1])
+
+
 def cb_mark_one(d, note, source):
-    n = mark_dates([d], note, source)
-    st.toast(f"Tanggal {tgl_id(d)} ditandai." if n else f"Tanggal {tgl_id(d)} sudah ditandai; catatan ditambahkan.")
+    added, skipped = mark_dates([d], note, source)
+    st.session_state["mark_msg"] = (("success", f"Tanggal {tgl_id(d)} ditandai.") if added
+                                    else ("error", taken_msg(skipped[0][1])))
 
 
 def cb_mark_recs(items):
-    n = sum(mark_dates([d], note, "excel") for d, note in items)
-    st.toast(f"{n} tanggal baru ditandai dari Excel.")
+    added, skipped = [], []
+    for d, note in items:  # baris pertama untuk satu tanggal menang; berikutnya dilewati
+        a, s = mark_dates([d], note, "excel")
+        added += a
+        skipped += s
+    text = f"{len(added)} tanggal baru ditandai."
+    if skipped:
+        text += (f" {len(skipped)} dilewati karena tanggalnya sudah terisi (1 tanggal = 1 penanda): "
+                 f"{skipped_text(skipped)}.")
+    st.session_state["mark_msg"] = ("warning" if skipped else "success", text)
+
+
+def panel_days(prefix):
+    """Tanggal yang sedang dipilih di panel kalender (kosong bila rentang belum lengkap)."""
+    ss = st.session_state
+    if ss.get(f"cal_{prefix}_mode", "Satu tanggal") == "Satu tanggal":
+        v = ss.get(f"cal_{prefix}_date")
+        return [v] if isinstance(v, date) else []
+    rng = ss.get(f"cal_{prefix}_rng")
+    if isinstance(rng, (tuple, list)) and len(rng) == 2:
+        a, b = rng
+        return [a + timedelta(i) for i in range((b - a).days + 1)]
+    return []
 
 
 def cb_cal_add(prefix):
     ss = st.session_state
-    note = (ss.get(f"cal_{prefix}_note") or "").strip()
-    days = []
-    if ss.get(f"cal_{prefix}_mode", "Satu tanggal") == "Satu tanggal":
-        v = ss.get(f"cal_{prefix}_date")
-        days = [v] if isinstance(v, date) else []
-    else:
-        rng = ss.get(f"cal_{prefix}_rng")
-        if isinstance(rng, (tuple, list)) and len(rng) == 2:
-            a, b = rng
-            days = [a + timedelta(i) for i in range((b - a).days + 1)]
+    md = ss["marked_dates"]
+    msg_key = f"cal_{prefix}_msg"
+    days = panel_days(prefix)
     if not days:
-        st.toast("Pilih tanggal (atau rentang lengkap) dulu.")
+        ss[msg_key] = ("error", "Pilih tanggal (atau rentang lengkap) dulu.")
         return
-    n = mark_dates(days, note, "manual")
+    taken = [(d, md[d.isoformat()]["note"]) for d in days if d.isoformat() in md]
+    if taken:
+        ss[msg_key] = ("error", taken_msg(taken[0][1]) if len(days) == 1
+                       else f"Sudah terisi: {skipped_text(taken)} silakan ganti tanggal lain")
+        return
+    added, _ = mark_dates(days, ss.get(f"cal_{prefix}_note"), "manual")
     ss[f"cal_{prefix}_note"] = ""
-    st.toast(f"{n} tanggal baru ditandai.")
+    ss[msg_key] = ("success", f"{len(added)} tanggal ditandai.")
 
 
 def cb_cal_del(prefix):
@@ -1228,11 +1264,40 @@ def cb_cal_clear():
     st.session_state["marked_dates"] = {}
 
 
+def cb_cal_nav(prefix, delta):
+    ss = st.session_state
+    y, m = divmod(ss[f"cal_{prefix}_vy"] * 12 + ss[f"cal_{prefix}_vm"] + delta, 12)
+    if y in TAHUN:
+        ss[f"cal_{prefix}_vy"], ss[f"cal_{prefix}_vm"] = y, m
+
+
+def sync_view(prefix, selected):
+    """Tampilan bulan kalender mengikuti tanggal yang baru dipilih (di form atau di panel).
+    Pengguna tetap bebas memilih bulan/tahun lain secara manual."""
+    ss = st.session_state
+    kvm, kvy, klast = f"cal_{prefix}_vm", f"cal_{prefix}_vy", f"cal_{prefix}_last"
+    days = panel_days(prefix)
+    p = days[0] if days else None
+    last_sel, last_p = ss.get(klast, (None, None))
+    target = None
+    if kvm not in ss or kvy not in ss:
+        target = selected or p or date.today()
+        if target.year not in TAHUN:
+            target = date(TAHUN[0], 1, 1)
+    elif selected is not None and selected != last_sel:
+        target = selected
+    elif p is not None and last_p is not None and p != last_p:
+        target = p
+    ss[klast] = (selected, p)
+    if target is not None and target.year in TAHUN:
+        ss[kvy], ss[kvm] = target.year, target.month - 1
+
+
 def cal_html(year, month, marked, hl=()):
     css = ("<style>.cal{border-collapse:collapse;width:100%;table-layout:fixed;text-align:center}"
            ".cal th{padding:4px;font-size:.8em;opacity:.7}"
            ".cal td{padding:8px 0;border:1px solid rgba(128,128,128,.25)}"
-           ".cal-out{opacity:.3}.cal-mark{background:#e8590c;color:#fff;font-weight:700}"
+           ".cal-out{opacity:.3}.cal-mark{background:#e8590c;color:#fff;font-weight:700;cursor:help}"
            ".cal-hl{outline:2px solid #1c7ed6;outline-offset:-2px}.cal-today{text-decoration:underline}"
            "</style>")
     today = date.today().isoformat()
@@ -1251,12 +1316,12 @@ def cal_html(year, month, marked, hl=()):
                 cls.append("cal-hl")
             if k == today:
                 cls.append("cal-today")
-            tip = escape("; ".join(marked[k]["notes"]) or "Ditandai", {'"': "&quot;"}) if k in marked else ""
+            tip = escape("📌 " + marked[k]["note"], {'"': "&quot;"}) if k in marked else ""
             tds += f'<td class="{" ".join(cls)}" title="{tip}">{d.day}</td>'
         body += f"<tr>{tds}</tr>"
     legend = ("<div style='font-size:.8em;margin-top:6px;opacity:.8'>"
-              "🟧 sudah pernah dibuat &nbsp; 🟦 tanggal terpilih di form &nbsp; <u>garis bawah</u> = hari ini"
-              " &nbsp; (arahkan kursor ke tanggal oranye untuk melihat catatan)</div>")
+              "🟧 sudah terisi penanda &nbsp; 🟦 tanggal terpilih &nbsp; <u>garis bawah</u> = hari ini"
+              " &nbsp; (arahkan kursor ke tanggal oranye untuk melihat nama penanda)</div>")
     return f'{css}<table class="cal"><tr>{head}</tr>{body}</table>{legend}'
 
 
@@ -1264,15 +1329,29 @@ def calendar_panel(prefix, selected=None):
     ss = st.session_state
     md = ss["marked_dates"]
     ref = selected or date.today()
-    c1, c2 = st.columns(2)
-    ym = c1.selectbox("Bulan", range(12), format_func=lambda i: BULAN[i], index=ref.month - 1,
-                      key=f"cal_{prefix}_m_{ref.year}_{ref.month}")
-    yy = c2.selectbox("Tahun", TAHUN, index=TAHUN.index(ref.year) if ref.year in TAHUN else 0,
-                      key=f"cal_{prefix}_y_{ref.year}")
-    st.markdown(cal_html(yy, ym + 1, md, {selected.isoformat()} if selected else ()), unsafe_allow_html=True)
-    st.caption(f"{len(md)} tanggal ditandai.")
+    sync_view(prefix, selected)
+    kvm, kvy = f"cal_{prefix}_vm", f"cal_{prefix}_vy"
 
-    st.markdown("**Tandai manual (seperti reminder)**")
+    n1, n2, n3, n4 = st.columns([1, 3, 3, 1])
+    n1.button("◀", on_click=cb_cal_nav, args=(prefix, -1), key=f"cal_{prefix}_prev", use_container_width=True)
+    n2.selectbox("Bulan", range(12), format_func=lambda i: BULAN[i], key=kvm, label_visibility="collapsed")
+    n3.selectbox("Tahun", TAHUN, key=kvy, label_visibility="collapsed")
+    n4.button("▶", on_click=cb_cal_nav, args=(prefix, 1), key=f"cal_{prefix}_next", use_container_width=True)
+
+    year, month = ss[kvy], ss[kvm] + 1
+    hl = {d.isoformat() for d in panel_days(prefix)}
+    if selected:
+        hl.add(selected.isoformat())
+    st.markdown(cal_html(year, month, md, hl), unsafe_allow_html=True)
+    this_month = [(k, v) for k, v in sorted(md.items())
+                  if k.startswith(f"{year:04d}-{month:02d}-")]
+    if this_month:
+        st.caption(f"**Penanda {BULAN[month - 1]} {year}:**  \n" +
+                   "  \n".join(f"• {int(k[-2:])} {BULAN[month - 1]} — {v['note']}" for k, v in this_month))
+    else:
+        st.caption(f"Belum ada penanda di {BULAN[month - 1]} {year}. Total semua bulan: {len(md)} tanggal.")
+
+    st.markdown("**Tandai manual (seperti reminder)** — 1 tanggal hanya bisa 1 penanda")
     mode = st.radio("Cara menandai", ["Satu tanggal", "Rentang tanggal"], horizontal=True,
                     key=f"cal_{prefix}_mode", label_visibility="collapsed")
     if mode == "Satu tanggal":
@@ -1280,14 +1359,23 @@ def calendar_panel(prefix, selected=None):
     else:
         st.date_input("Rentang tanggal (awal lalu akhir)", value=(ref, ref), key=f"cal_{prefix}_rng",
                       format="DD/MM/YYYY")
-    st.text_input("Catatan (opsional)", key=f"cal_{prefix}_note", placeholder="mis. Listing SR 2 Tukak Sadai")
-    st.button("📌 Tandai tanggal", on_click=cb_cal_add, args=(prefix,), key=f"cal_{prefix}_btn_add")
+    days = panel_days(prefix)
+    taken = [(d, md[d.isoformat()]["note"]) for d in days if d.isoformat() in md]
+    if taken:
+        st.warning(taken_msg(taken[0][1]) if len(days) == 1
+                   else f"Sudah terisi: {skipped_text(taken)} silakan ganti tanggal lain")
+    st.text_input("Nama penanda / deskripsi", key=f"cal_{prefix}_note", placeholder="mis. Listing SR 2 Tukak Sadai")
+    st.button("📌 Tandai tanggal", on_click=cb_cal_add, args=(prefix,), key=f"cal_{prefix}_btn_add",
+              disabled=bool(taken) or not days)
+    msg = ss.pop(f"cal_{prefix}_msg", None)
+    if msg:
+        {"success": st.success, "warning": st.warning, "error": st.error}[msg[0]](msg[1])
 
     if md:
         st.markdown("**Daftar tanggal ditandai**")
         st.dataframe(pd.DataFrame(
-            [(tgl_id(date.fromisoformat(k)), SRC_LABEL.get(v["source"], v["source"]), "; ".join(v["notes"]))
-             for k, v in sorted(md.items())], columns=["Tanggal", "Sumber", "Catatan"]),
+            [(tgl_id(date.fromisoformat(k)), SRC_LABEL.get(v["source"], v["source"]), v["note"])
+             for k, v in sorted(md.items())], columns=["Tanggal", "Sumber", "Penanda"]),
             hide_index=True, use_container_width=True)
         st.multiselect("Hapus tanda pada tanggal", sorted(md), key=f"cal_{prefix}_del",
                        format_func=lambda k: tgl_id(date.fromisoformat(k)))
@@ -1305,13 +1393,16 @@ def calendar_panel(prefix, selected=None):
     if up is not None and ss.get("cal_up_last") != (up.name, up.size):
         try:
             data = json.loads(up.getvalue().decode("utf-8"))
+            n_add = n_skip = 0
             for k, v in data.items():
                 dd = date.fromisoformat(k)
-                src = v.get("source", "manual")
-                mark_dates([dd], "", src)
-                for n in v.get("notes", []):
-                    mark_dates([dd], str(n), src)
+                note = v.get("note") or "; ".join(str(x) for x in v.get("notes", []))  # format lama: notes
+                a, s = mark_dates([dd], note, v.get("source", "manual"))
+                n_add += len(a)
+                n_skip += len(s)
             ss["cal_up_last"] = (up.name, up.size)
+            ss[f"cal_{prefix}_msg"] = (("warning", f"{n_add} tanggal dimuat; {n_skip} dilewati karena tanggalnya sudah terisi.")
+                                       if n_skip else ("success", f"{n_add} tanggal dimuat."))
             st.rerun()
         except Exception:
             st.error("File JSON kalender tidak valid.")
@@ -1473,7 +1564,10 @@ def page_laporan(paper, use_kop, photo_w, photo_h):
         download_block(docs, paper, "lap", f"Laporan_Translok_{tgl.strftime('%Y-%m-%d')}")
         st.button("📌 Tandai tanggal ini sudah dibuat", on_click=cb_mark_one,
                   args=(tgl, rec_note(rec), "laporan"), key="btn_mark_lap",
-                  help="Menandai tanggal pelaksanaan di kalender agar muncul peringatan bila dipakai lagi.")
+                  disabled=tgl.isoformat() in ss["marked_dates"],
+                  help="Menandai tanggal pelaksanaan di kalender (1 tanggal = 1 penanda). "
+                       "Nonaktif bila tanggal sudah terisi penanda.")
+        show_mark_msg()
 
 
 # ----------------------------------------------------------------------------
@@ -1558,12 +1652,14 @@ def page_excel(paper, use_kop, photo_w, photo_h):
             st.dataframe(pd.DataFrame(errors, columns=["Baris Excel", "Masalah"]), hide_index=True)
         conf = date_conflicts(recs)
         if conf:
-            st.warning(f"{len(conf)} baris memakai tanggal yang sudah ditandai di kalender "
-                       f"atau kembar dengan baris lain di Excel (tetap diproses):")
+            st.warning(f"{len(conf)} baris memakai tanggal yang sudah terisi penanda di kalender "
+                       f"atau kembar dengan baris lain di Excel (laporan tetap diproses; saat ditandai, "
+                       f"hanya tanggal yang masih kosong yang dimasukkan):")
             st.dataframe(pd.DataFrame(conf, columns=["Baris Excel", "Tanggal", "Keterangan"]), hide_index=True)
         if recs:
             st.button("📌 Tandai semua tanggal dari Excel ke kalender", on_click=cb_mark_recs,
                       args=([(r["tanggal"], rec_note(r)) for r in recs],), key="btn_mark_xl")
+        show_mark_msg()
         fmap = {f.name.casefold(): f for f in fotos or []}
         if recs and st.button("🚀 Generate laporan dari Excel", type="primary", key="btn_gen_xl"):
             docs, warns, left = [], [], set()
