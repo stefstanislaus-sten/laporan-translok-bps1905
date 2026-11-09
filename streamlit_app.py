@@ -936,7 +936,8 @@ def init_state():
     ss.setdefault("applied_style", "Default")
     ss.setdefault("extra_vars", [])
     ss.setdefault("xl_edver", 0)
-    ss.setdefault("marked_dates", {})  # {"2026-04-24": {"note": "...", "source": "manual|laporan|excel"}}
+    ss.setdefault("marked_dates", {})
+    migrate_marked()  # {"2026-04-24": {"note": "...", "source": "manual|laporan|excel"}}
 
 
 def reset_inputs(prefixes, counter=None, extra_del=()):
@@ -1140,6 +1141,19 @@ def points_editor(prefix):
 HARI_SINGKAT = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
 SRC_LABEL = {"manual": "Manual", "laporan": "Laporan dibuat", "excel": "Dari Excel"}
 NO_NOTE = "Tanpa deskripsi"
+
+
+def migrate_marked():
+    """Ubah entri format lama ({"notes": [...]}) ke format baru ({"note": "..."}) agar tidak error."""
+    md = st.session_state["marked_dates"]
+    for k, v in list(md.items()):
+        if not isinstance(v, dict):
+            md[k] = {"note": str(v).strip() or NO_NOTE, "source": "manual"}
+            continue
+        if "note" not in v:
+            v["note"] = "; ".join(str(n) for n in v.get("notes", [])) or NO_NOTE
+        v.pop("notes", None)
+        v.setdefault("source", "manual")
 
 
 def taken_msg(note):
