@@ -1,9 +1,10 @@
+import calendar
 import copy
 import io
 import json
 import re
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -935,10 +936,11 @@ def init_state():
     ss.setdefault("applied_style", "Default")
     ss.setdefault("extra_vars", [])
     ss.setdefault("xl_edver", 0)
+    ss.setdefault("marked_dates", {})  # {"2026-04-24": {"notes": [...], "source": "manual|laporan|excel"}}
 
 
 def reset_inputs(prefixes, counter=None, extra_del=()):
-    """Reset HANYA isian data. Gaya teks, templat, dan poin uraian tidak dihapus."""
+    """Reset HANYA isian data. Gaya teks, templat, poin uraian, dan kalender tidak dihapus."""
     ss = st.session_state
     for k in list(ss.keys()):
         if k.startswith(tuple(prefixes)) or k in extra_del:
@@ -1133,6 +1135,189 @@ def points_editor(prefix):
 
 
 # ----------------------------------------------------------------------------
+# KALENDER PENANDAAN TANGGAL
+# ----------------------------------------------------------------------------
+HARI_SINGKAT = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
+SRC_LABEL = {"manual": "Manual", "laporan": "Laporan dibuat", "excel": "Dari Excel"}
+
+
+def mark_dates(days, note="", source="manual"):
+    md = st.session_state["marked_dates"]
+    added = 0
+    for d in days:
+        k = d.isoformat()
+        if k in md:
+            if note and note not in md[k]["notes"]:
+                md[k]["notes"].append(note)
+        else:
+            md[k] = {"notes": [note] if note else [], "source": source}
+            added += 1
+    return added
+
+
+def rec_note(rec):
+    return f"{rec['survei']} - Kec. {rec['kec']} - PCL {rec['pcl']}"
+
+
+def date_warning(d, container=st):
+    e = st.session_state["marked_dates"].get(d.isoformat())
+    if e:
+        extra = f" Catatan: {'; '.join(e['notes'])}." if e["notes"] else ""
+        container.warning(f"📅 Tanggal {tgl_id(d)} sudah pernah ditandai di kalender "
+                          f"({SRC_LABEL.get(e['source'], e['source'])}).{extra}")
+
+
+def date_conflicts(recs):
+    """Tanggal dari Excel yang (a) sudah ada di kalender, atau (b) kembar dengan baris lain di Excel."""
+    md = st.session_state["marked_dates"]
+    by = {}
+    for r in recs:
+        by.setdefault(r["tanggal"], []).append(r["row"])
+    out = []
+    for r in recs:
+        why = []
+        e = md.get(r["tanggal"].isoformat())
+        if e:
+            why.append("Sudah ditandai di kalender" + (f" ({'; '.join(e['notes'])})" if e["notes"] else ""))
+        same = [str(x) for x in by[r["tanggal"]] if x != r["row"]]
+        if same:
+            why.append("Tanggal sama dengan baris " + ", ".join(same))
+        if why:
+            out.append((r["row"], tgl_id(r["tanggal"]), "; ".join(why)))
+    return out
+
+
+def cb_mark_one(d, note, source):
+    n = mark_dates([d], note, source)
+    st.toast(f"Tanggal {tgl_id(d)} ditandai." if n else f"Tanggal {tgl_id(d)} sudah ditandai; catatan ditambahkan.")
+
+
+def cb_mark_recs(items):
+    n = sum(mark_dates([d], note, "excel") for d, note in items)
+    st.toast(f"{n} tanggal baru ditandai dari Excel.")
+
+
+def cb_cal_add(prefix):
+    ss = st.session_state
+    note = (ss.get(f"cal_{prefix}_note") or "").strip()
+    days = []
+    if ss.get(f"cal_{prefix}_mode", "Satu tanggal") == "Satu tanggal":
+        v = ss.get(f"cal_{prefix}_date")
+        days = [v] if isinstance(v, date) else []
+    else:
+        rng = ss.get(f"cal_{prefix}_rng")
+        if isinstance(rng, (tuple, list)) and len(rng) == 2:
+            a, b = rng
+            days = [a + timedelta(i) for i in range((b - a).days + 1)]
+    if not days:
+        st.toast("Pilih tanggal (atau rentang lengkap) dulu.")
+        return
+    n = mark_dates(days, note, "manual")
+    ss[f"cal_{prefix}_note"] = ""
+    st.toast(f"{n} tanggal baru ditandai.")
+
+
+def cb_cal_del(prefix):
+    ss = st.session_state
+    for k in ss.get(f"cal_{prefix}_del", []):
+        ss["marked_dates"].pop(k, None)
+    ss[f"cal_{prefix}_del"] = []
+
+
+def cb_cal_clear():
+    st.session_state["marked_dates"] = {}
+
+
+def cal_html(year, month, marked, hl=()):
+    css = ("<style>.cal{border-collapse:collapse;width:100%;table-layout:fixed;text-align:center}"
+           ".cal th{padding:4px;font-size:.8em;opacity:.7}"
+           ".cal td{padding:8px 0;border:1px solid rgba(128,128,128,.25)}"
+           ".cal-out{opacity:.3}.cal-mark{background:#e8590c;color:#fff;font-weight:700}"
+           ".cal-hl{outline:2px solid #1c7ed6;outline-offset:-2px}.cal-today{text-decoration:underline}"
+           "</style>")
+    today = date.today().isoformat()
+    head = "".join(f"<th>{h}</th>" for h in HARI_SINGKAT)
+    body = ""
+    for week in calendar.Calendar(0).monthdatescalendar(year, month):
+        tds = ""
+        for d in week:
+            k = d.isoformat()
+            cls = ["cal-d"]
+            if d.month != month:
+                cls.append("cal-out")
+            if k in marked:
+                cls.append("cal-mark")
+            if k in hl:
+                cls.append("cal-hl")
+            if k == today:
+                cls.append("cal-today")
+            tip = escape("; ".join(marked[k]["notes"]) or "Ditandai", {'"': "&quot;"}) if k in marked else ""
+            tds += f'<td class="{" ".join(cls)}" title="{tip}">{d.day}</td>'
+        body += f"<tr>{tds}</tr>"
+    legend = ("<div style='font-size:.8em;margin-top:6px;opacity:.8'>"
+              "🟧 sudah pernah dibuat &nbsp; 🟦 tanggal terpilih di form &nbsp; <u>garis bawah</u> = hari ini"
+              " &nbsp; (arahkan kursor ke tanggal oranye untuk melihat catatan)</div>")
+    return f'{css}<table class="cal"><tr>{head}</tr>{body}</table>{legend}'
+
+
+def calendar_panel(prefix, selected=None):
+    ss = st.session_state
+    md = ss["marked_dates"]
+    ref = selected or date.today()
+    c1, c2 = st.columns(2)
+    ym = c1.selectbox("Bulan", range(12), format_func=lambda i: BULAN[i], index=ref.month - 1,
+                      key=f"cal_{prefix}_m_{ref.year}_{ref.month}")
+    yy = c2.selectbox("Tahun", TAHUN, index=TAHUN.index(ref.year) if ref.year in TAHUN else 0,
+                      key=f"cal_{prefix}_y_{ref.year}")
+    st.markdown(cal_html(yy, ym + 1, md, {selected.isoformat()} if selected else ()), unsafe_allow_html=True)
+    st.caption(f"{len(md)} tanggal ditandai.")
+
+    st.markdown("**Tandai manual (seperti reminder)**")
+    mode = st.radio("Cara menandai", ["Satu tanggal", "Rentang tanggal"], horizontal=True,
+                    key=f"cal_{prefix}_mode", label_visibility="collapsed")
+    if mode == "Satu tanggal":
+        st.date_input("Tanggal", value=ref, key=f"cal_{prefix}_date", format="DD/MM/YYYY")
+    else:
+        st.date_input("Rentang tanggal (awal lalu akhir)", value=(ref, ref), key=f"cal_{prefix}_rng",
+                      format="DD/MM/YYYY")
+    st.text_input("Catatan (opsional)", key=f"cal_{prefix}_note", placeholder="mis. Listing SR 2 Tukak Sadai")
+    st.button("📌 Tandai tanggal", on_click=cb_cal_add, args=(prefix,), key=f"cal_{prefix}_btn_add")
+
+    if md:
+        st.markdown("**Daftar tanggal ditandai**")
+        st.dataframe(pd.DataFrame(
+            [(tgl_id(date.fromisoformat(k)), SRC_LABEL.get(v["source"], v["source"]), "; ".join(v["notes"]))
+             for k, v in sorted(md.items())], columns=["Tanggal", "Sumber", "Catatan"]),
+            hide_index=True, use_container_width=True)
+        st.multiselect("Hapus tanda pada tanggal", sorted(md), key=f"cal_{prefix}_del",
+                       format_func=lambda k: tgl_id(date.fromisoformat(k)))
+        b1, b2 = st.columns(2)
+        b1.button("🗑️ Hapus tanda terpilih", on_click=cb_cal_del, args=(prefix,), key=f"cal_{prefix}_btn_del",
+                  use_container_width=True)
+        b2.button("🧹 Hapus semua tanda", on_click=cb_cal_clear, key=f"cal_{prefix}_btn_clear",
+                  use_container_width=True)
+
+    # simpan / muat (session Streamlit hilang saat refresh, jadi simpan ke JSON agar tidak hilang)
+    st.download_button("⬇️ Unduh kalender (JSON)", json.dumps(md, ensure_ascii=False, indent=1),
+                       file_name="kalender_tanggal_laporan.json", mime="application/json",
+                       key=f"cal_{prefix}_dl")
+    up = st.file_uploader("Muat kalender dari file JSON", type=["json"], key=f"cal_{prefix}_up")
+    if up is not None and ss.get("cal_up_last") != (up.name, up.size):
+        try:
+            data = json.loads(up.getvalue().decode("utf-8"))
+            for k, v in data.items():
+                dd = date.fromisoformat(k)
+                src = v.get("source", "manual")
+                mark_dates([dd], "", src)
+                for n in v.get("notes", []):
+                    mark_dates([dd], str(n), src)
+            ss["cal_up_last"] = (up.name, up.size)
+            st.rerun()
+        except Exception:
+            st.error("File JSON kalender tidak valid.")
+
+
+# ----------------------------------------------------------------------------
 # DOWNLOAD
 # ----------------------------------------------------------------------------
 def download_block(docs, paper, key, base_name):
@@ -1172,7 +1357,7 @@ def page_laporan(paper, use_kop, photo_w, photo_h):
         h1.subheader("1. Isi Data")
         h2.button("🔄 Reset isian data", on_click=reset_inputs, args=(LAP_INPUTS, "upl_n_lap_"),
                   key="btn_reset_lap", use_container_width=True,
-                  help="Hanya mengosongkan isian data. Gaya teks, templat, dan poin uraian tetap ada.")
+                  help="Hanya mengosongkan isian data. Gaya teks, templat, poin uraian, dan kalender tetap ada.")
         c1, c2 = st.columns(2)
         kegiatan = c1.selectbox("Pilih Kegiatan", KEGIATAN, key="lap_kegiatan")
         tahun = c2.selectbox("Pilih Tahun", TAHUN, key="lap_tahun")
@@ -1198,6 +1383,9 @@ def page_laporan(paper, use_kop, photo_w, photo_h):
         tgl_default = date.today() if date.today().year == tahun else date(tahun, 1, 1)
         tgl = st.date_input("Pilih Tanggal", value=tgl_default, min_value=date(tahun, 1, 1),
                             max_value=date(tahun, 12, 31), key=f"lap_tgl_{tahun}", format="DD/MM/YYYY")
+        date_warning(tgl)
+        with st.expander("📅 Kalender penandaan tanggal"):
+            calendar_panel("lap", tgl)
         pel = st.selectbox("Nama Pelaksana", range(len(PELAKSANA)), format_func=lambda i: PELAKSANA[i][0], key="lap_pel")
 
         with st.expander("➕ Variabel tambahan (untuk dipakai di uraian poin)"):
@@ -1283,6 +1471,9 @@ def page_laporan(paper, use_kop, photo_w, photo_h):
         st.caption("Preview dibuat dari versi PDF. Tata letak file Word bisa sedikit berbeda.")
         st.subheader("3. Download")
         download_block(docs, paper, "lap", f"Laporan_Translok_{tgl.strftime('%Y-%m-%d')}")
+        st.button("📌 Tandai tanggal ini sudah dibuat", on_click=cb_mark_one,
+                  args=(tgl, rec_note(rec), "laporan"), key="btn_mark_lap",
+                  help="Menandai tanggal pelaksanaan di kalender agar muncul peringatan bila dipakai lagi.")
 
 
 # ----------------------------------------------------------------------------
@@ -1351,7 +1542,9 @@ def page_excel(paper, use_kop, photo_w, photo_h):
                              type=["jpg", "jpeg"], accept_multiple_files=True, key=f"xl_fotos_{n_upl}")
     st.button("🔄 Reset upload", on_click=reset_inputs, args=(("xl_file_", "xl_fotos_"), "upl_n_xl_",
                                                               ("xl_docs", "xl_zip")), key="btn_reset_xl",
-              help="Hanya mengosongkan file upload & hasil generate. Gaya dan poin tetap ada.")
+              help="Hanya mengosongkan file upload & hasil generate. Gaya, poin, dan kalender tetap ada.")
+    with st.expander("📅 Kalender penandaan tanggal"):
+        calendar_panel("xl")
     if xl:
         try:
             recs, errors, _ = parse_excel(xl)
@@ -1363,6 +1556,14 @@ def page_excel(paper, use_kop, photo_w, photo_h):
         if errors:
             st.error(f"{len(errors)} baris bermasalah dan dilewati:")
             st.dataframe(pd.DataFrame(errors, columns=["Baris Excel", "Masalah"]), hide_index=True)
+        conf = date_conflicts(recs)
+        if conf:
+            st.warning(f"{len(conf)} baris memakai tanggal yang sudah ditandai di kalender "
+                       f"atau kembar dengan baris lain di Excel (tetap diproses):")
+            st.dataframe(pd.DataFrame(conf, columns=["Baris Excel", "Tanggal", "Keterangan"]), hide_index=True)
+        if recs:
+            st.button("📌 Tandai semua tanggal dari Excel ke kalender", on_click=cb_mark_recs,
+                      args=([(r["tanggal"], rec_note(r)) for r in recs],), key="btn_mark_xl")
         fmap = {f.name.casefold(): f for f in fotos or []}
         if recs and st.button("🚀 Generate laporan dari Excel", type="primary", key="btn_gen_xl"):
             docs, warns, left = [], [], set()
@@ -1385,8 +1586,9 @@ def page_excel(paper, use_kop, photo_w, photo_h):
                             warns.append(f"Baris {rec['row']}: foto '{fn}' tidak bisa dibaca.")
                 left |= placeholders_left(perihal + " " + " ".join(p["t"] for p in points))
                 d = doc_data(rec, v, perihal, points, scale_photos(ph, photo_w, photo_h, paper), use_kop)
+                warn_mark = "⚠️ " if rec["tanggal"].isoformat() in ss["marked_dates"] else ""
                 docs.append(dict(name=f"{i:02d}_{safe(v['tanggal'])}_{safe(v['kecamatan'])}_{safe(rec['pcl'])}",
-                                 label=f"Baris {rec['row']} – {rec['pcl']} – {v['kecamatan']}", d=d, v=v))
+                                 label=f"{warn_mark}Baris {rec['row']} – {rec['pcl']} – {v['kecamatan']}", d=d, v=v))
                 prog.progress(i / len(recs))
             if left:
                 warns.append("Variabel belum terdefinisi/tidak ada kolomnya di Excel: " +
